@@ -24,14 +24,14 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		if err := db.Ping(r.Context()); err != nil {
 			http.Error(w, "database unreachable", http.StatusServiceUnavailable)
 			return
 		}
 		w.Write([]byte("ok"))
 	})
-	mux.Handle("GET /me", auth.RequireLogin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /api/me", auth.RequireLogin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u, _ := auth.UserFromContext(r.Context())
 		fmt.Fprintf(w, "hello %s, admin=%v", u.Username, u.IsAdmin)
 	})))
