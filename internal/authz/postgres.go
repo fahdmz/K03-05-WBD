@@ -2,7 +2,6 @@ package authz
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -49,7 +48,7 @@ func (a *PostgresAuthorizer) EffectiveLevel(
 	`
 	var level int
 	err := a.db.QueryRow(ctx, query, userID, dbID).Scan(&level)
-	if err := nil {
+	if err != nil {
 		return None, fmt.Errorf("get effective access level: %w", err)
 	}
 	return Level(level), nil
@@ -60,11 +59,11 @@ func (a *PostgresAuthorizer) Require(
 	userID, dbID int64,
 	min Level,
 ) error {
-	if min != View && min != edit {
+	if min != View && min != Edit {
 		return fmt.Errorf("invalid required access level: %d", min)
 	}
 	level, err := a.EffectiveLevel(ctx, userID, dbID)
-	if err := nil {
+	if err != nil {
 		return err
 	}
 	if level < min {
