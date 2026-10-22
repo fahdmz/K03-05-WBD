@@ -10,6 +10,7 @@ import (
 
 	"github.com/fahdmz/K03-05-WBD/internal/auth"
 	"github.com/fahdmz/K03-05-WBD/internal/store"
+	"github.com/fahdmz/K03-05-WBD/internal/admin"
 	"github.com/joho/godotenv"
 )
 
@@ -23,6 +24,13 @@ func main() {
 	defer db.Close()
 
 	mux := http.NewServeMux()
+	
+	adminHandler := admin.NewHandler(db)
+
+	mux.Handle(
+		"GET /api/admin/users",
+		auth.RequireLogin(http.HandlerFunc(adminHandler.ListUsers)),
+	)
 
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		if err := db.Ping(r.Context()); err != nil {
