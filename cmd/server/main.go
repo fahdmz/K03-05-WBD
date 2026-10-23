@@ -10,6 +10,7 @@ import (
 
 	"github.com/fahdmz/K03-05-WBD/internal/auth"
 	"github.com/fahdmz/K03-05-WBD/internal/store"
+	"github.com/fahdmz/K03-05-WBD/internal/web"
 	"github.com/joho/godotenv"
 )
 
@@ -35,6 +36,21 @@ func main() {
 		u, _ := auth.UserFromContext(r.Context())
 		fmt.Fprintf(w, "hello %s, admin=%v", u.Username, u.IsAdmin)
 	})))
+
+	devSession := func(w http.ResponseWriter, r *http.Request) {
+		web.WriteJSON(w, http.StatusOK, map[string]any{
+			"user": map[string]any{
+				"id": 1, "username": "dev", "isAdmin": true, "isActive": true,
+			},
+			"csrfToken": "dev-token",
+		})
+	}
+
+	mux.HandleFunc("GET /api/auth/me", devSession)
+	mux.HandleFunc("POST /api/auth/login", devSession)
+	mux.HandleFunc("POST /api/auth/logout", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
 
 	log.Println("listening on http://localhost:8080")
 	log.Fatal(http.ListenAndServe(":8080", mux))
