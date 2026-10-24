@@ -62,3 +62,7 @@ export async function api<T>(path: string, options: Options = {}): Promise<T> {
     }
     return res.json()
 }
+
+export function errorMessage(err: unknown): string {
+    return err instanceof ApiError ? err.message : 'Tidak dapat terhubung ke server'
+}
