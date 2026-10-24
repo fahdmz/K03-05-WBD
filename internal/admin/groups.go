@@ -15,6 +15,12 @@ type groupResponse struct {
 	Description string `json:"description"`
 }
 
+type groupDetailResponse struct {
+	groupResponse
+	MemberIDs []int64           `json:"memberIds"`
+	Access    []groupAccessEntry `json:"access"`
+}
+
 func scanGroup(row pgx.Row) (groupResponse, error) {
 	var group groupResponse
 	err := row.Scan(&group.ID, &group.Name, &group.Description)
@@ -24,17 +30,48 @@ func scanGroup(row pgx.Row) (groupResponse, error) {
 func (h *ResourceHandler) ListGroups(w http.ResponseWriter, r *http.Request) {
 	h.run(w, r, http.StatusOK, func(ctx context.Context, tx pgx.Tx) (any, error) {
 		rows, err := tx.Query(ctx, `
-			SELECT id, name, description FROM groups ORDER BY id
+			SELECT
+				g.id,
+				g.name,
+				g.description,
+				ARRAY(
+					SELECT gm.user_id
+					FROM group_members gm
+					WHERE gm.group_id = g.id
+					ORDER BY gm.user_id
+				) AS member_ids,
+				COALESCE(
+					(
+						SELECT jsonb_agg(
+							jsonb_build_object(
+								'databaseId', ga.db_connection_id,
+								'level', ga.level
+							)
+							ORDER BY ga.db_connection_id
+						)
+						FROM group_db_access ga
+						WHERE ga.group_id = g.id
+					),
+					'[]'::jsonb
+				) AS access
+			FROM groups g
+			ORDER BY g.id
 		`)
 		if err != nil {
 			return nil, err
 		}
 		defer rows.Close()
 
-		groups := make([]groupResponse, 0)
+		groups := make([]groupDetailResponse, 0)
 		for rows.Next() {
-			group, err := scanGroup(rows)
-			if err != nil {
+			var group groupDetailResponse
+			if err := rows.Scan(
+				&group.ID,
+				&group.Name,
+				&group.Description,
+				&group.MemberIDs,
+				&group.Access,
+			); err != nil {
 				return nil, err
 			}
 			groups = append(groups, group)

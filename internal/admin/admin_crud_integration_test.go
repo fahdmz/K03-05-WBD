@@ -422,3 +422,82 @@ func TestResourceTransactionRollbackIntegration(t *testing.T) {
 		t.Fatal("rolled-back deletion invalidated connection")
 	}
 }
+
+func TestListGroupsDetailsIntegration(t *testing.T) {
+	e := newAdminIntegrationEnv(t)
+	e.seed(t)
+
+	e.exec(t, `
+		INSERT INTO groups (id, name, description)
+		VALUES
+			(11, 'empty-group', ''),
+			(12, 'other-group', 'separate');
+
+		INSERT INTO db_connections (
+			id, name, host, dbname, username, password_encrypted
+		)
+		VALUES (
+			11, 'second-db', 'localhost', 'other', 'target', '\x00'
+		);
+
+		INSERT INTO group_members (group_id, user_id)
+		VALUES
+			(10, 30),
+			(10, 20),
+			(12, 10);
+
+		INSERT INTO group_db_access (
+			group_id, db_connection_id, level
+		)
+		VALUES
+			(10, 11, 'edit'),
+			(10, 10, 'view'),
+			(12, 11, 'view');
+	`)
+
+	rec := e.call(t, e.res.ListGroups, "GET", "", "", 200)
+
+	// Explicit JSON fields also verify the public response contract.
+	type listedGroup struct {
+		ID          int64              `json:"id"`
+		Name        string             `json:"name"`
+		Description string             `json:"description"`
+		MemberIDs   []int64            `json:"memberIds"`
+		Access      []groupAccessEntry `json:"access"`
+	}
+
+	got := adminTestDecode[[]listedGroup](t, rec)
+
+	want := []listedGroup{
+		{
+			ID:          10,
+			Name:        "team",
+			Description: "original",
+			MemberIDs:   []int64{20, 30},
+			Access: []groupAccessEntry{
+				{DatabaseID: 10, Level: "view"},
+				{DatabaseID: 11, Level: "edit"},
+			},
+		},
+		{
+			ID:          11,
+			Name:        "empty-group",
+			Description: "",
+			MemberIDs:   []int64{},
+			Access:      []groupAccessEntry{},
+		},
+		{
+			ID:          12,
+			Name:        "other-group",
+			Description: "separate",
+			MemberIDs:   []int64{10},
+			Access: []groupAccessEntry{
+				{DatabaseID: 11, Level: "view"},
+			},
+		},
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("groups = %#v, want %#v", got, want)
+	}
+}
