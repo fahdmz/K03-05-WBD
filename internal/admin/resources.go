@@ -24,6 +24,7 @@ type ResourceHandler struct {
 	db      *pgxpool.Pool
 	manager dbmanager.Manager
 	aead    cipher.AEAD
+	sessionFactory SessionManagerFactory
 }
 
 func NewResourceHandler(
@@ -218,3 +219,28 @@ func (h *ResourceHandler) RegisterRoutes(mux *http.ServeMux) {
 		mux.Handle(pattern, auth.RequireLogin(handler))
 	}
 }
+
+func (h *ResourceHandler) WithSessionManagerFactory(
+	factory SessionManagerFactory,
+) *ResourceHandler {
+	copy := *h
+	copy.sessionFactory = factory
+	return &copy
+}
+
+func (h *ResourceHandler) sessionManager(tx pgx.Tx) (SessionManager, error) {
+	if h.sessionFactory == nil {
+		return nil, &resourceError{
+			status:  http.StatusServiceUnavailable,
+			message: "Pengelolaan session belum tersedia",
+		}
+	}
+
+	manager := h.sessionFactory(tx)
+	if manager == nil {
+		return nil, errors.New("session manager factory returned nil")
+	}
+
+	return manager, nil
+}
+

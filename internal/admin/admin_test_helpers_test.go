@@ -222,7 +222,9 @@ func newAdminIntegrationEnv(t *testing.T) *adminIntegrationEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-
+	res = res.WithSessionManagerFactory(func(tx pgx.Tx) SessionManager {
+		return &transactionTestSessions{tx: tx}
+	})
 	return &adminIntegrationEnv{
 		db: db, users: NewHandler(db), res: res, manager: manager,
 	}
@@ -309,4 +311,32 @@ func (e *adminIntegrationEnv) session(t *testing.T, userID int64, token string) 
 		)
 		VALUES ($1, $2, 'test-csrf', NOW() + INTERVAL '1 hour')
 	`, userID, token)
+}
+
+type transactionTestSessions struct {
+	tx pgx.Tx
+}
+
+func (s *transactionTestSessions) RevokeUserSessions(
+	ctx context.Context,
+	userID int64,
+) error {
+	_, err := s.tx.Exec(ctx, `
+		UPDATE sessions
+		SET revoked_at = NOW()
+		WHERE user_id = $1 AND revoked_at IS NULL
+	`, userID)
+	return err
+}
+
+func (s *transactionTestSessions) RotateUserSessions(
+	ctx context.Context,
+	userID int64,
+) error {
+	_, err := s.tx.Exec(ctx, `
+		UPDATE sessions
+		SET last_rotated_at = 'epoch'::timestamptz
+		WHERE user_id = $1 AND revoked_at IS NULL
+	`, userID)
+	return err
 }

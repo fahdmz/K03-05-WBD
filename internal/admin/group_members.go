@@ -48,7 +48,9 @@ func (h *ResourceHandler) SetGroupMembers(
 
 		var count int
 		if err := tx.QueryRow(ctx, `
-			SELECT COUNT(*) FROM users WHERE id = ANY($1::bigint[])
+			SELECT COUNT(*)
+			FROM users
+			WHERE id = ANY($1::bigint[])
 		`, *input.UserIDs).Scan(&count); err != nil {
 			return nil, err
 		}
@@ -56,7 +58,29 @@ func (h *ResourceHandler) SetGroupMembers(
 			return nil, badInput("Ada user yang tidak ditemukan")
 		}
 
-		if err := revokeGroupSessions(ctx, tx, id); err != nil {
+		var previousMembers []int64
+		if err := tx.QueryRow(ctx, `
+			SELECT ARRAY(
+				SELECT user_id
+				FROM group_members
+				WHERE group_id = $1
+				ORDER BY user_id
+			)
+		`, id).Scan(&previousMembers); err != nil {
+			return nil, err
+		}
+
+		changes := membershipSessionChanges(previousMembers, *input.UserIDs)
+
+		if len(changes.revoke) == 0 && len(changes.rotate) == 0 {
+			return map[string]any{
+				"groupId": id,
+				"userIds": *input.UserIDs,
+			}, nil
+		}
+
+		sessions, err := h.sessionManager(tx)
+		if err != nil {
 			return nil, err
 		}
 
@@ -74,7 +98,7 @@ func (h *ResourceHandler) SetGroupMembers(
 			return nil, err
 		}
 
-		if err := revokeGroupSessions(ctx, tx, id); err != nil {
+		if err := changes.Apply(ctx, sessions); err != nil {
 			return nil, err
 		}
 

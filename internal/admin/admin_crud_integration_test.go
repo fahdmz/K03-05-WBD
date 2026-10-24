@@ -154,8 +154,8 @@ func TestGroupMembersIntegration(t *testing.T) {
 	e.call(t, e.res.SetGroupMembers, "PUT", "10", `{"userIds":[30]}`, 200)
 	e.count(t, "SELECT COUNT(*) FROM group_members WHERE group_id=10", 1)
 	e.count(t, "SELECT COUNT(*) FROM group_members WHERE group_id=10 AND user_id=30", 1)
-	e.count(t, "SELECT COUNT(*) FROM sessions WHERE revoked_at IS NULL", 0)
-
+	e.count(t, `SELECT COUNT(*) FROM sessions WHERE user_id = 20 AND revoked_at IS NOT NULL`, 1)
+	e.count(t, `SELECT COUNT(*) FROM sessions WHERE user_id = 30 AND revoked_at IS NULL AND last_rotated_at = 'epoch'::timestamptz`, 1)
 	e.call(t, e.res.SetGroupMembers, "PUT", "10", `{"userIds":[99999]}`, 400)
 	e.count(t, "SELECT COUNT(*) FROM group_members WHERE group_id=10 AND user_id=30", 1)
 
