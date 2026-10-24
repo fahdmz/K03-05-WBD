@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/fahdmz/K03-05-WBD/internal/auth"
-	"github.com/fahdmz/K03-05-WBD/internal/store"
 	"github.com/fahdmz/K03-05-WBD/internal/admin"
+	"github.com/fahdmz/K03-05-WBD/internal/auth"
+	"github.com/fahdmz/K03-05-WBD/internal/authz"
 	"github.com/fahdmz/K03-05-WBD/internal/dbmanager"
+	"github.com/fahdmz/K03-05-WBD/internal/migration"
+	"github.com/fahdmz/K03-05-WBD/internal/store"
 	"github.com/jackc/pgx/v5"
 	"github.com/joho/godotenv"
 )
@@ -33,7 +35,7 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	
+
 	sessionFactory := func(tx pgx.Tx) admin.SessionManager {
 		return authSvc.InTx(tx)
 	}
@@ -70,9 +72,15 @@ func main() {
 
 	authSvc.RegisterRoutes(mux)
 
+	manager, err := dbmanager.NewPostgresManagerFromEnv(db)
+	if err != nil {
+		log.Fatal(err)
+	}
+	authorizer := authz.NewPostgresAuthorizer(db)
+
 	resourceHandler, err := admin.NewResourceHandler(
 		db,
-		dbmanager.Stub{},
+		manager,
 		os.Getenv("DB_ENCRYPTION_KEY"),
 	)
 	if err != nil {
@@ -81,6 +89,16 @@ func main() {
 	resourceHandler = resourceHandler.WithSessionManagerFactory(sessionFactory)
 
 	resourceHandler.RegisterRoutes(mux)
+
+	// Viewer dan migration mendaftarkan route sendiri, jadi dipasang di sub-mux
+	// lalu dibungkus RequireLogin sekali.
+	databaseMux := http.NewServeMux()
+	dbmanager.NewViewer(db, manager, authorizer).Register(databaseMux)
+	migration.NewHandler(db, manager, authorizer).Register(databaseMux)
+	databaseRoutes := auth.RequireLogin(databaseMux)
+	mux.Handle("/api/databases", databaseRoutes)
+	mux.Handle("/api/databases/", databaseRoutes)
+	mux.Handle("/api/migrations/", databaseRoutes)
 
 	log.Println("listening on http://localhost:8080")
 	log.Fatal(http.ListenAndServe(":8080", mux))
