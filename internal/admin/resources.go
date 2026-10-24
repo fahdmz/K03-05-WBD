@@ -21,9 +21,9 @@ import (
 )
 
 type ResourceHandler struct {
-	db      *pgxpool.Pool
-	manager dbmanager.Manager
-	aead    cipher.AEAD
+	db             *pgxpool.Pool
+	manager        dbmanager.Manager
+	aead           cipher.AEAD
 	sessionFactory SessionManagerFactory
 }
 
@@ -188,31 +188,34 @@ func lockGroup(ctx context.Context, tx pgx.Tx, id int64) error {
 	).Scan(&found)
 }
 
-func revokeGroupSessions(ctx context.Context, tx pgx.Tx, id int64) error {
-	_, err := tx.Exec(ctx, `
-		UPDATE sessions
-		SET revoked_at = NOW()
-		WHERE revoked_at IS NULL
-		  AND user_id IN (
-			SELECT user_id FROM group_members WHERE group_id = $1
-		  )
-	`, id)
-	return err
+func (h *ResourceHandler) revokeUserSessions(ctx context.Context, tx pgx.Tx, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	manager, err := h.sessionManager(tx)
+	if err != nil {
+		return err
+	}
+	changes := newSessionChanges()
+	for _, id := range ids {
+		changes.Revoke(id)
+	}
+	return changes.Apply(ctx, manager)
 }
 
 func (h *ResourceHandler) RegisterRoutes(mux *http.ServeMux) {
 	routes := map[string]http.HandlerFunc{
-		"GET /api/admin/groups":                 h.ListGroups,
-		"POST /api/admin/groups":                h.CreateGroup,
-		"PATCH /api/admin/groups/{id}":          h.UpdateGroup,
-		"DELETE /api/admin/groups/{id}":         h.DeleteGroup,
-		"PUT /api/admin/groups/{id}/members":    h.SetGroupMembers,
-		"PUT /api/admin/groups/{id}/access":     h.SetGroupAccess,
-		"GET /api/admin/databases":              h.ListDatabases,
-		"POST /api/admin/databases":             h.CreateDatabase,
-		"PATCH /api/admin/databases/{id}":        h.UpdateDatabase,
-		"DELETE /api/admin/databases/{id}":       h.DeleteDatabase,
-		"POST /api/admin/databases/test":         h.TestDatabase,
+		"GET /api/admin/groups":              h.ListGroups,
+		"POST /api/admin/groups":             h.CreateGroup,
+		"PATCH /api/admin/groups/{id}":       h.UpdateGroup,
+		"DELETE /api/admin/groups/{id}":      h.DeleteGroup,
+		"PUT /api/admin/groups/{id}/members": h.SetGroupMembers,
+		"PUT /api/admin/groups/{id}/access":  h.SetGroupAccess,
+		"GET /api/admin/databases":           h.ListDatabases,
+		"POST /api/admin/databases":          h.CreateDatabase,
+		"PATCH /api/admin/databases/{id}":    h.UpdateDatabase,
+		"DELETE /api/admin/databases/{id}":   h.DeleteDatabase,
+		"POST /api/admin/databases/test":     h.TestDatabase,
 	}
 
 	for pattern, handler := range routes {
@@ -243,4 +246,3 @@ func (h *ResourceHandler) sessionManager(tx pgx.Tx) (SessionManager, error) {
 
 	return manager, nil
 }
-

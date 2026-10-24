@@ -217,16 +217,18 @@ func (h *ResourceHandler) DeleteDatabase(w http.ResponseWriter, r *http.Request)
 			return nil, err
 		}
 
-		if _, err := tx.Exec(ctx, `
-			UPDATE sessions
-			SET revoked_at = NOW()
-			WHERE revoked_at IS NULL AND user_id IN (
-				SELECT gm.user_id
+		var memberIDs []int64
+		if err := tx.QueryRow(ctx, `
+			SELECT ARRAY(
+				SELECT DISTINCT gm.user_id
 				FROM group_members gm
 				JOIN group_db_access ga ON ga.group_id = gm.group_id
 				WHERE ga.db_connection_id = $1
 			)
-		`, id); err != nil {
+		`, id).Scan(&memberIDs); err != nil {
+			return nil, err
+		}
+		if err := h.revokeUserSessions(ctx, tx, memberIDs); err != nil {
 			return nil, err
 		}
 

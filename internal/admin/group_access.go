@@ -60,7 +60,8 @@ func (h *ResourceHandler) SetGroupAccess(
 
 		var count int
 		if err := tx.QueryRow(ctx, `
-			SELECT COUNT(*) FROM db_connections WHERE id = ANY($1::bigint[])
+			SELECT COUNT(*) FROM db_connections
+			WHERE id = ANY($1::bigint[])
 		`, ids).Scan(&count); err != nil {
 			return nil, err
 		}
@@ -68,8 +69,67 @@ func (h *ResourceHandler) SetGroupAccess(
 			return nil, badInput("Ada database yang tidak ditemukan")
 		}
 
-		if err := revokeGroupSessions(ctx, tx, id); err != nil {
+		rows, err := tx.Query(ctx, `
+			SELECT db_connection_id, level
+			FROM group_db_access
+			WHERE group_id = $1
+		`, id)
+		if err != nil {
 			return nil, err
+		}
+
+		previous, err := pgx.CollectRows(rows,
+			func(row pgx.CollectableRow) (groupAccessEntry, error) {
+				var entry groupAccessEntry
+				err := row.Scan(&entry.DatabaseID, &entry.Level)
+				return entry, err
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		result := map[string]any{
+			"groupId": id,
+			"access":  *input.Access,
+		}
+
+		oldLevels := make(map[int64]string, len(previous))
+		for _, entry := range previous {
+			oldLevels[entry.DatabaseID] = entry.Level
+		}
+
+		unchanged := len(previous) == len(*input.Access)
+		for _, entry := range *input.Access {
+			if oldLevels[entry.DatabaseID] != entry.Level {
+				unchanged = false
+				break
+			}
+		}
+		if unchanged {
+			return result, nil
+		}
+
+		var memberIDs []int64
+		if err := tx.QueryRow(ctx, `
+			SELECT ARRAY(
+				SELECT user_id
+				FROM group_members
+				WHERE group_id = $1
+				ORDER BY user_id
+			)
+		`, id).Scan(&memberIDs); err != nil {
+			return nil, err
+		}
+
+		changes := accessSessionChanges(memberIDs, previous, *input.Access)
+
+		var sessions SessionManager
+		if len(changes.revoke) > 0 || len(changes.rotate) > 0 {
+			sessions, err = h.sessionManager(tx)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		if _, err := tx.Exec(ctx,
@@ -87,9 +147,12 @@ func (h *ResourceHandler) SetGroupAccess(
 			return nil, err
 		}
 
-		return map[string]any{
-			"groupId": id,
-			"access":  *input.Access,
-		}, nil
+		if sessions != nil {
+			if err := changes.Apply(ctx, sessions); err != nil {
+				return nil, err
+			}
+		}
+
+		return result, nil
 	}, nil)
 }

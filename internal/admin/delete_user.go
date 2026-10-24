@@ -1,6 +1,11 @@
 package admin
 
-import "net/http"
+import (
+	"context"
+	"net/http"
+
+	"github.com/jackc/pgx/v5"
+)
 
 func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 	actor, ok := requireAdminUser(w, r)
@@ -20,15 +25,35 @@ func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err := queryUser(r.Context(), h.db, `
-		DELETE FROM users
-		WHERE id = $1
-		RETURNING id, username, is_admin, is_active
-	`, id)
-	if err != nil {
-		writeUserError(w, err)
-		return
-	}
+	h.runUserTransaction(w, r, http.StatusNoContent,
+		func(ctx context.Context, tx pgx.Tx) (any, error) {
+			if _, err := queryUser(ctx, tx, `
+				SELECT id, username, is_admin, is_active
+				FROM users
+				WHERE id = $1
+				FOR UPDATE
+			`, id); err != nil {
+				return nil, err
+			}
 
-	w.WriteHeader(http.StatusNoContent)
+			sessions, err := h.sessionManager(tx)
+			if err != nil {
+				return nil, err
+			}
+
+			if err := sessions.RevokeUserSessions(ctx, id); err != nil {
+				return nil, err
+			}
+
+			if _, err := queryUser(ctx, tx, `
+				DELETE FROM users
+				WHERE id = $1
+				RETURNING id, username, is_admin, is_active
+			`, id); err != nil {
+				return nil, err
+			}
+
+			return nil, nil
+		},
+	)
 }

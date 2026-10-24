@@ -153,7 +153,6 @@ type adminIntegrationEnv struct {
 	manager *adminTestManager
 }
 
-// Each test uses its own schema because resource handlers commit transactions.
 func newAdminIntegrationEnv(t *testing.T) *adminIntegrationEnv {
 	t.Helper()
 
@@ -226,7 +225,11 @@ func newAdminIntegrationEnv(t *testing.T) *adminIntegrationEnv {
 		return &transactionTestSessions{tx: tx}
 	})
 	return &adminIntegrationEnv{
-		db: db, users: NewHandler(db), res: res, manager: manager,
+		db: db, users: NewHandler(db).WithSessionManagerFactory(
+			func(tx pgx.Tx) SessionManager {
+				return &transactionTestSessions{tx: tx}
+			},
+		), res: res, manager: manager,
 	}
 }
 

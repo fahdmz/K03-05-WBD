@@ -1,8 +1,11 @@
 package admin
 
 import (
+	"context"
 	"net/http"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
 )
 
 type updateUserRequest struct {
@@ -68,37 +71,70 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		passwordHash = &hash
 	}
 
-	revokeSessions := input.Password != nil ||
-		input.IsAdmin != nil ||
-		input.IsActive != nil
+	h.runUserTransaction(w, r, http.StatusOK,
+		func(ctx context.Context, tx pgx.Tx) (any, error) {
+			before, err := queryUser(ctx, tx, `
+				SELECT id, username, is_admin, is_active
+				FROM users
+				WHERE id = $1
+				FOR UPDATE
+			`, id)
+			if err != nil {
+				return nil, err
+			}
 
-	user, err := queryUser(r.Context(), h.db, `
-		WITH updated AS (
-			UPDATE users
-			SET
-				username = COALESCE($2::text, username),
-				password_hash = COALESCE($3::text, password_hash),
-				is_admin = COALESCE($4::boolean, is_admin),
-				is_active = COALESCE($5::boolean, is_active)
-			WHERE id = $1
-			RETURNING id, username, is_admin, is_active
-		),
-		revoked AS (
-			UPDATE sessions
-			SET revoked_at = NOW()
-			WHERE user_id IN (SELECT id FROM updated)
-				AND revoked_at IS NULL
-				AND $6::boolean
-			RETURNING id
-		)
-		SELECT id, username, is_admin, is_active
-		FROM updated
-	`, id, input.Username, passwordHash,
-		input.IsAdmin, input.IsActive, revokeSessions)
-	if err != nil {
-		writeUserError(w, err)
-		return
-	}
+			nextAdmin := before.IsAdmin
+			if input.IsAdmin != nil {
+				nextAdmin = *input.IsAdmin
+			}
 
-	writeJSON(w, http.StatusOK, user)
+			nextActive := before.IsActive
+			if input.IsActive != nil {
+				nextActive = *input.IsActive
+			}
+
+			changes := newSessionChanges()
+
+			revoke := input.Password != nil ||
+				(before.IsAdmin && !nextAdmin) ||
+				(before.IsActive && !nextActive)
+
+			if revoke {
+				changes.Revoke(id)
+			} else if !before.IsAdmin && nextAdmin {
+				changes.Rotate(id)
+			}
+
+			var sessions SessionManager
+			if len(changes.revoke) > 0 || len(changes.rotate) > 0 {
+				sessions, err = h.sessionManager(tx)
+				if err != nil {
+					return nil, err
+				}
+			}
+
+			user, err := queryUser(ctx, tx, `
+				UPDATE users
+				SET
+					username = COALESCE($2::text, username),
+					password_hash = COALESCE($3::text, password_hash),
+					is_admin = COALESCE($4::boolean, is_admin),
+					is_active = COALESCE($5::boolean, is_active)
+				WHERE id = $1
+				RETURNING id, username, is_admin, is_active
+			`, id, input.Username, passwordHash,
+				input.IsAdmin, input.IsActive)
+			if err != nil {
+				return nil, err
+			}
+
+			if sessions != nil {
+				if err := changes.Apply(ctx, sessions); err != nil {
+					return nil, err
+				}
+			}
+
+			return user, nil
+		},
+	)
 }

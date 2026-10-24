@@ -153,10 +153,6 @@ func TestUserMutationsUnit(t *testing.T) {
 		{"create", "POST",
 			`{"username":" alice ","password":"password123","isAdmin":false}`,
 			201, func(h *Handler) http.HandlerFunc { return h.CreateUser }},
-		{"update", "PATCH", `{"username":"alice"}`,
-			200, func(h *Handler) http.HandlerFunc { return h.UpdateUser }},
-		{"delete", "DELETE", "",
-			204, func(h *Handler) http.HandlerFunc { return h.DeleteUser }},
 	}
 
 	failures := []struct {

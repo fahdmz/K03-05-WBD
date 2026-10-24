@@ -15,7 +15,8 @@ type Querier interface {
 }
 
 type Handler struct {
-	db Querier
+	db             Querier
+	sessionFactory SessionManagerFactory
 }
 
 func NewHandler(db Querier) *Handler {

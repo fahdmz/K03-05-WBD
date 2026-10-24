@@ -17,7 +17,7 @@ type groupResponse struct {
 
 type groupDetailResponse struct {
 	groupResponse
-	MemberIDs []int64           `json:"memberIds"`
+	MemberIDs []int64            `json:"memberIds"`
 	Access    []groupAccessEntry `json:"access"`
 }
 
@@ -170,7 +170,13 @@ func (h *ResourceHandler) DeleteGroup(w http.ResponseWriter, r *http.Request) {
 		if err := lockGroup(ctx, tx, id); err != nil {
 			return nil, err
 		}
-		if err := revokeGroupSessions(ctx, tx, id); err != nil {
+		var memberIDs []int64
+		if err := tx.QueryRow(ctx, `
+			SELECT ARRAY(SELECT user_id FROM group_members WHERE group_id = $1)
+		`, id).Scan(&memberIDs); err != nil {
+			return nil, err
+		}
+		if err := h.revokeUserSessions(ctx, tx, memberIDs); err != nil {
 			return nil, err
 		}
 
