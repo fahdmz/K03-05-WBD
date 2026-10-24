@@ -8,6 +8,8 @@ import (
 
 	"github.com/fahdmz/K03-05-WBD/internal/auth"
 	"github.com/fahdmz/K03-05-WBD/internal/store"
+	"github.com/fahdmz/K03-05-WBD/internal/admin"
+	"github.com/fahdmz/K03-05-WBD/internal/dbmanager"
 	"github.com/joho/godotenv"
 )
 
@@ -30,6 +32,28 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
+	
+	adminHandler := admin.NewHandler(db)
+
+	mux.Handle(
+		"GET /api/admin/users",
+		auth.RequireLogin(http.HandlerFunc(adminHandler.ListUsers)),
+	)
+
+	mux.Handle(
+		"POST /api/admin/users",
+		auth.RequireLogin(http.HandlerFunc(adminHandler.CreateUser)),
+	)
+
+	mux.Handle(
+		"PATCH /api/admin/users/{id}",
+		auth.RequireLogin(http.HandlerFunc(adminHandler.UpdateUser)),
+	)
+
+	mux.Handle(
+		"DELETE /api/admin/users/{id}",
+		auth.RequireLogin(http.HandlerFunc(adminHandler.DeleteUser)),
+	)
 
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		if err := db.Ping(r.Context()); err != nil {
@@ -40,6 +64,17 @@ func main() {
 	})
 
 	authSvc.RegisterRoutes(mux)
+
+	resourceHandler, err := admin.NewResourceHandler(
+		db,
+		dbmanager.Stub{},
+		os.Getenv("DB_ENCRYPTION_KEY"),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	resourceHandler.RegisterRoutes(mux)
 
 	log.Println("listening on http://localhost:8080")
 	log.Fatal(http.ListenAndServe(":8080", mux))
