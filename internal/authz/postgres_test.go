@@ -93,11 +93,11 @@ func TestRequire(t *testing.T) {
 	queryErr := errors.New("database unavailable")
 
 	tests := []struct {
-		name      string
-		level     Level
-		min       Level
-		dbErr     error
-		wantErr   error
+		name    string
+		level   Level
+		min     Level
+		dbErr   error
+		wantErr error
 	}{
 		{
 			name:    "none cannot view",
