@@ -17,10 +17,7 @@ import (
 )
 
 func TestSeedAdminIntegration(t *testing.T) {
-	testURL := os.Getenv("TEST_DATABASE_URL")
-	if testURL == "" {
-		t.Skip("TEST_DATABASE_URL belum diatur")
-	}
+	testURL := testDatabaseURL(t)
 
 	schemaSQL, err := os.ReadFile(
 		filepath.Join("..", "..", "migrations", "001_init.sql"),
@@ -174,4 +171,25 @@ func TestSeedAdminIntegration(t *testing.T) {
 		err.Error() != "gagal membuat admin; periksa schema dan koneksi database" {
 		t.Fatalf("expected generic database error, got %v", err)
 	}
+}
+
+// testDatabaseURL mengembalikan TEST_DATABASE_URL (atau default test-db) dan
+// men-skip test kalau database itu tidak bisa dihubungi.
+func testDatabaseURL(t *testing.T) string {
+	t.Helper()
+	u := os.Getenv("TEST_DATABASE_URL")
+	if u == "" {
+		u = "postgres://test:test@localhost:5434/test?sslmode=disable"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := pgx.Connect(ctx, u)
+	if err == nil {
+		err = conn.Ping(ctx)
+		_ = conn.Close(ctx)
+	}
+	if err != nil {
+		t.Skipf("test-db tidak bisa dihubungi, jalankan docker compose up -d test-db: %v", err)
+	}
+	return u
 }

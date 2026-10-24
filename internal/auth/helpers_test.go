@@ -34,6 +34,18 @@ func setupDB(t *testing.T) *pgxpool.Pool {
 	if err != nil {
 		t.Fatalf("reset schema: %v", err)
 	}
+	// Didaftarkan sebelum pool.Close, jadi berjalan setelah pool test ditutup.
+	t.Cleanup(func() {
+		cleanup, err := pgxpool.New(context.Background(), testDatabaseURL())
+		if err != nil {
+			t.Errorf("koneksi cleanup: %v", err)
+			return
+		}
+		defer cleanup.Close()
+		if _, err := cleanup.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+testSchema+" CASCADE"); err != nil {
+			t.Errorf("drop schema %s: %v", testSchema, err)
+		}
+	})
 
 	cfg, err := pgxpool.ParseConfig(testDatabaseURL())
 	if err != nil {
