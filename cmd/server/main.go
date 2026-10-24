@@ -10,6 +10,7 @@ import (
 	"github.com/fahdmz/K03-05-WBD/internal/store"
 	"github.com/fahdmz/K03-05-WBD/internal/admin"
 	"github.com/fahdmz/K03-05-WBD/internal/dbmanager"
+	"github.com/jackc/pgx/v5"
 	"github.com/joho/godotenv"
 )
 
@@ -33,7 +34,11 @@ func main() {
 
 	mux := http.NewServeMux()
 	
-	adminHandler := admin.NewHandler(db)
+	sessionFactory := func(tx pgx.Tx) admin.SessionManager {
+		return authSvc.InTx(tx)
+	}
+
+	adminHandler := admin.NewHandler(db).WithSessionManagerFactory(sessionFactory)
 
 	mux.Handle(
 		"GET /api/admin/users",
@@ -73,6 +78,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	resourceHandler = resourceHandler.WithSessionManagerFactory(sessionFactory)
 
 	resourceHandler.RegisterRoutes(mux)
 

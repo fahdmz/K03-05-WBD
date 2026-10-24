@@ -220,3 +220,52 @@ func TestUserDinonaktifkanSessionDitolak(t *testing.T) {
 		t.Fatalf("user nonaktif harusnya ditolak, dapat %v", err)
 	}
 }
+
+func TestInTxIkutTransaksi(t *testing.T) {
+	s, _ := newTestService(t)
+	budi := createUser(t, s, "budi", "rahasia123", true)
+	ani := createUser(t, s, "ani", "rahasia123", true)
+	tokenBudi := mustLogin(t, s, "budi", "rahasia123")
+	tokenAni := mustLogin(t, s, "ani", "rahasia123")
+	ctx := context.Background()
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InTx(tx).RevokeUserSessions(ctx, budi); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Authenticate(ctx, tokenBudi); err != nil {
+		t.Fatalf("transaksi di-rollback, session harusnya tetap valid: %v", err)
+	}
+
+	tx, err = s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := s.InTx(tx)
+	if err := m.RevokeUserSessions(ctx, budi); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RotateUserSessions(ctx, ani); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.Authenticate(ctx, tokenBudi); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("setelah commit, session budi harusnya dicabut, dapat %v", err)
+	}
+	got, err := s.Authenticate(ctx, tokenAni)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.NewToken == "" {
+		t.Fatal("setelah commit, session ani harusnya dirotasi")
+	}
+}

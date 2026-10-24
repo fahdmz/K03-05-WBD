@@ -189,7 +189,7 @@ func (s *Service) Authenticate(ctx context.Context, token string) (*Session, err
 	if isCurrent && now.Sub(rotatedAt) >= s.cfg.RotateInterval {
 		fresh, rerr := s.rotate(ctx, sess.ID, h)
 		if rerr != nil {
-			return nil, err
+			return nil, rerr
 		}
 		sess.NewToken = fresh
 		return &sess, nil

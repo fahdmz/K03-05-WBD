@@ -35,7 +35,7 @@ export async function api<T>(path: string, options: Options = {}): Promise<T> {
         headers['X-CSRF-Token'] = csrfToken
     }
 
-    const res = await fetch('api' + path, {
+    const res = await fetch('/api' + path, {
         method,
         headers,
         credentials: 'include',

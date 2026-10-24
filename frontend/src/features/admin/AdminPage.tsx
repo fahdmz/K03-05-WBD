@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
-import { adminApi, adminErrorMessage } from './api'
+import { api, errorMessage } from '../../lib/api'
 import type { Access, Database, Group, User } from './types'
 import './admin.css'
 
@@ -169,13 +169,13 @@ function EditorDialog({
 
     try {
       const { name: _name, ...config } = databaseBody(values)
-      await adminApi('/admin/databases/test', 'POST', {
-        ...config,
-        password,
+      await api('/admin/databases/test', {
+        method: 'POST',
+        body: { ...config, password },
       })
       setTestResult('Koneksi berhasil.')
     } catch (err) {
-      setError(adminErrorMessage(err))
+      setError(errorMessage(err))
     } finally {
       operationPending.current = false
       setBusy(false)
@@ -222,35 +222,35 @@ function EditorDialog({
             }
           }
 
-          await adminApi(
+          await api(
             editor.row
               ? `/admin/users/${editor.row.id}`
               : '/admin/users',
-            editor.row ? 'PATCH' : 'POST',
-            body,
+            { method: editor.row ? 'PATCH' : 'POST', body },
           )
           break
         }
 
         case 'group':
-          await adminApi(
+          await api(
             editor.row
               ? `/admin/groups/${editor.row.id}`
               : '/admin/groups',
-            editor.row ? 'PATCH' : 'POST',
             {
-              name: String(values.get('name') ?? '').trim(),
-              description: String(values.get('description') ?? ''),
+              method: editor.row ? 'PATCH' : 'POST',
+              body: {
+                name: String(values.get('name') ?? '').trim(),
+                description: String(values.get('description') ?? ''),
+              },
             },
           )
           break
 
         case 'members':
-          await adminApi(
-            `/admin/groups/${editor.row.id}/members`,
-            'PUT',
-            { userIds: values.getAll('memberIds').map(Number) },
-          )
+          await api(`/admin/groups/${editor.row.id}/members`, {
+            method: 'PUT',
+            body: { userIds: values.getAll('memberIds').map(Number) },
+          })
           break
 
         case 'access': {
@@ -262,11 +262,10 @@ function EditorDialog({
             }
           }
 
-          await adminApi(
-            `/admin/groups/${editor.row.id}/access`,
-            'PUT',
-            { access },
-          )
+          await api(`/admin/groups/${editor.row.id}/access`, {
+            method: 'PUT',
+            body: { access },
+          })
           break
         }
 
@@ -278,21 +277,19 @@ function EditorDialog({
             body.password = password
           }
 
-          await adminApi(
+          await api(
             editor.row
               ? `/admin/databases/${editor.row.id}`
               : '/admin/databases',
-            editor.row ? 'PATCH' : 'POST',
-            body,
+            { method: editor.row ? 'PATCH' : 'POST', body },
           )
           break
         }
 
         case 'delete':
-          await adminApi(
-            `/admin/${editor.resource}/${editor.id}`,
-            'DELETE',
-          )
+          await api(`/admin/${editor.resource}/${editor.id}`, {
+            method: 'DELETE',
+          })
           break
       }
 
@@ -302,7 +299,7 @@ function EditorDialog({
           : 'Perubahan berhasil disimpan.',
       )
     } catch (err) {
-      setError(adminErrorMessage(err))
+      setError(errorMessage(err))
     } finally {
       operationPending.current = false
       setBusy(false)
@@ -602,14 +599,14 @@ export default function AdminPage({
 
       try {
         const [users, groups, databases] = await Promise.all([
-          adminApi<User[]>('/admin/users'),
-          adminApi<Group[]>('/admin/groups'),
-          adminApi<Database[]>('/admin/databases'),
+          api<User[]>('/admin/users'),
+          api<Group[]>('/admin/groups'),
+          api<Database[]>('/admin/databases'),
         ])
 
         if (active) setData({ users, groups, databases })
       } catch (err) {
-        if (active) setError(adminErrorMessage(err))
+        if (active) setError(errorMessage(err))
       } finally {
         if (active) setLoading(false)
       }
