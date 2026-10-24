@@ -24,17 +24,21 @@ func UserFromContext(ctx context.Context) (*User, bool) {
 
 func RequireLogin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fake := &User{ID: 1, Username: "dev", IsAdmin: true}
-		next.ServeHTTP(w, r.WithContext(WithUser(r.Context(), fake)))
+		svc.Protect(next).ServeHTTP(w, r)
 	})
 }
 
-type SessionRevoker interface {
+type SessionManager interface {
 	RevokeUserSessions(ctx context.Context, userID int64) error
+	RotateUserSessions(ctx context.Context, userID int64) error
 }
 
-type NoopRevoker struct{}
+type NoopSessionManager struct{}
 
-func (NoopRevoker) RevokeUserSessions(ctx context.Context, userID int64) error {
+func (NoopSessionManager) RevokeUserSessions(ctx context.Context, userID int64) error {
+	return nil
+}
+
+func (NoopSessionManager) RotateUserSessions(ctx context.Context, userID int64) error {
 	return nil
 }
