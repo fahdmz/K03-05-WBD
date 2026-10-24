@@ -41,6 +41,31 @@ Platform web untuk mengatur akses ke database PostgreSQL bersama: login, pengelo
    1. http://localhost:8080/health, harus menampilkan `ok`
    2. http://localhost:8080/me, harus menampilkan `hello dev, admin=true` (masih user palsu dari stub)
 
+### Menjalankan integration test
+
+Pastikan database lokal sudah hidup dan schema internal sudah dibuat. Di PowerShell:
+
+```powershell
+$env:VIEWER_TEST_DATABASE_URL = "postgres://platform:platform@localhost:5435/platform?sslmode=disable"
+$env:VIEWER_TEST_TARGET_URL = "postgres://test:test@localhost:5434/test?sslmode=disable"
+$env:MIGRATION_TEST_DATABASE_URL = $env:VIEWER_TEST_DATABASE_URL
+$env:MIGRATION_TEST_TARGET_URL = $env:VIEWER_TEST_TARGET_URL
+$env:POSTGRES_MANAGER_TEST_DATABASE_URL = $env:VIEWER_TEST_DATABASE_URL
+$env:POSTGRES_MANAGER_TEST_TARGET_URL = $env:VIEWER_TEST_TARGET_URL
+go test ./...
+```
+
+Tanpa environment variable tersebut, integration test akan dilewati (`SKIP`), bukan dianggap berhasil.
+
+### Catatan pencatatan migration
+
+Database target dan database internal adalah dua database yang berbeda. SQL migration di-commit
+lebih dahulu pada database target, lalu status dan riwayatnya dicatat di database internal.
+Keduanya tidak berada dalam satu transaksi atomik lintas database. Jika target berhasil commit
+tetapi pencatatan riwayat internal gagal, perubahan target sudah terjadi sementara riwayat bisa
+belum menunjukkan status `success`. Server mengembalikan error secara eksplisit agar kondisi ini
+dapat ditindaklanjuti; aplikasi tidak mengklaim kedua commit tersebut atomik.
+
 Untuk mereset database dari nol:
 
 ```
