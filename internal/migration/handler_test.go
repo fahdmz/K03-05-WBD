@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +13,7 @@ import (
 	"github.com/fahdmz/K03-05-WBD/internal/auth"
 	"github.com/fahdmz/K03-05-WBD/internal/authz"
 	"github.com/fahdmz/K03-05-WBD/internal/dbmanager"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -69,46 +69,32 @@ func TestDecodeMigrationInput(t *testing.T) {
 }
 
 func TestMigrationIntegration(t *testing.T) {
-	platformURL := os.Getenv("MIGRATION_TEST_DATABASE_URL")
-	targetURL := os.Getenv("MIGRATION_TEST_TARGET_URL")
-	if platformURL == "" || targetURL == "" {
-		t.Skip("set MIGRATION_TEST_DATABASE_URL and MIGRATION_TEST_TARGET_URL to run PostgreSQL integration tests")
-	}
+	platformURL := envOr("MIGRATION_TEST_DATABASE_URL", testDatabaseURL())
+	targetURL := envOr("MIGRATION_TEST_TARGET_URL", testDatabaseURL())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	platform, err := pgxpool.New(ctx, platformURL)
-	if err != nil {
-		t.Fatalf("connect platform test database: %v", err)
-	}
-	defer platform.Close()
-	target, err := pgxpool.New(ctx, targetURL)
-	if err != nil {
-		t.Fatalf("connect target test database: %v", err)
-	}
-	defer target.Close()
-	if err := platform.Ping(ctx); err != nil {
-		t.Fatalf("ping platform test database: %v", err)
-	}
-	if err := target.Ping(ctx); err != nil {
-		t.Fatalf("ping target test database: %v", err)
-	}
+	platform := setupPlatformDB(t, platformURL)
+	target, targetSchema := setupTargetDB(t, targetURL)
 
 	username := fmt.Sprintf("migration_test_%d", time.Now().UnixNano())
 	var userID, dbID int64
 	if err := platform.QueryRow(ctx, `INSERT INTO users (username, password_hash) VALUES ($1, 'test') RETURNING id`, username).Scan(&userID); err != nil {
-		t.Fatalf("create test user (apply migrations/001_init.sql first): %v", err)
+		t.Fatalf("create test user: %v", err)
 	}
 	if err := platform.QueryRow(ctx, `
 		INSERT INTO db_connections (name, host, port, dbname, username, password_encrypted)
 		VALUES ($1, 'test', 5432, 'test', 'test', $2) RETURNING id`, username, []byte{1}).Scan(&dbID); err != nil {
-		_, _ = platform.Exec(ctx, `DELETE FROM users WHERE id = $1`, userID)
 		t.Fatalf("create test database record: %v", err)
 	}
-	t.Cleanup(func() {
-		_, _ = platform.Exec(context.Background(), `DELETE FROM db_connections WHERE id = $1`, dbID)
-		_, _ = platform.Exec(context.Background(), `DELETE FROM users WHERE id = $1`, userID)
-	})
+	tableExists := func(t *testing.T, tableName string) bool {
+		t.Helper()
+		var exists bool
+		if err := target.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, pgx.Identifier{targetSchema, tableName}.Sanitize()).Scan(&exists); err != nil {
+			t.Fatalf("check table %s: %v", tableName, err)
+		}
+		return exists
+	}
 
 	handler := NewHandler(platform, testManager{pool: target}, testAuthorizer{})
 	mux := http.NewServeMux()
@@ -134,7 +120,7 @@ func TestMigrationIntegration(t *testing.T) {
 
 	t.Run("successful migration commits and receives next version", func(t *testing.T) {
 		tableName := fmt.Sprintf("migration_ok_%d", time.Now().UnixNano())
-		t.Cleanup(func() { _, _ = target.Exec(context.Background(), "DROP TABLE IF EXISTS "+tableName) })
+		t.Cleanup(func() { dropTargetTable(t, target, targetSchema, tableName) })
 		item, status := assertExecute(t, "CREATE TABLE "+tableName+" (id INTEGER)")
 		if status != http.StatusOK || item.Status != "success" || item.Version == nil || *item.Version != 1 {
 			t.Fatalf("unexpected success result: HTTP %d, migration %#v", status, item)
@@ -150,22 +136,20 @@ func TestMigrationIntegration(t *testing.T) {
 		if updateResponse.Code != http.StatusBadRequest {
 			t.Fatalf("update status = %d, want %d; body=%s", updateResponse.Code, http.StatusBadRequest, updateResponse.Body.String())
 		}
-		var exists bool
-		if err := target.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, "public."+tableName).Scan(&exists); err != nil || !exists {
-			t.Fatalf("migration DDL not committed (exists=%t, err=%v)", exists, err)
+		if !tableExists(t, tableName) {
+			t.Fatalf("migration DDL not committed: %s.%s does not exist", targetSchema, tableName)
 		}
 	})
 
 	t.Run("failed migration rolls back and records failure", func(t *testing.T) {
 		tableName := fmt.Sprintf("migration_rollback_%d", time.Now().UnixNano())
-		t.Cleanup(func() { _, _ = target.Exec(context.Background(), "DROP TABLE IF EXISTS "+tableName) })
+		t.Cleanup(func() { dropTargetTable(t, target, targetSchema, tableName) })
 		item, status := assertExecute(t, "CREATE TABLE "+tableName+" (id INTEGER); SELECT 1 / 0")
 		if status != http.StatusOK || item.Status != "failed" || item.Version != nil || item.ErrorMessage == nil {
 			t.Fatalf("unexpected failure result: HTTP %d, migration %#v", status, item)
 		}
-		var exists bool
-		if err := target.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, "public."+tableName).Scan(&exists); err != nil || exists {
-			t.Fatalf("failed migration left DDL committed (exists=%t, err=%v)", exists, err)
+		if tableExists(t, tableName) {
+			t.Fatalf("failed migration left DDL committed: %s.%s exists", targetSchema, tableName)
 		}
 	})
 

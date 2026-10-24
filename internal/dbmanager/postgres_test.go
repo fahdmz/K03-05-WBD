@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -102,30 +101,13 @@ func TestConnectionTestErrorDoesNotExposePassword(t *testing.T) {
 }
 
 func TestPostgresManagerIntegration(t *testing.T) {
-	platformURL := os.Getenv("POSTGRES_MANAGER_TEST_DATABASE_URL")
-	targetURL := os.Getenv("POSTGRES_MANAGER_TEST_TARGET_URL")
-	if platformURL == "" || targetURL == "" {
-		t.Skip("set POSTGRES_MANAGER_TEST_DATABASE_URL and POSTGRES_MANAGER_TEST_TARGET_URL to run PostgreSQL integration tests")
-	}
+	platformURL := envOr("POSTGRES_MANAGER_TEST_DATABASE_URL", testDatabaseURL())
+	targetURL := envOr("POSTGRES_MANAGER_TEST_TARGET_URL", testDatabaseURL())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	platform, err := pgxpool.New(ctx, platformURL)
-	if err != nil {
-		t.Fatalf("connect platform test database: %v", err)
-	}
-	defer platform.Close()
-	target, err := pgxpool.New(ctx, targetURL)
-	if err != nil {
-		t.Fatalf("connect target test database: %v", err)
-	}
-	defer target.Close()
-	if err := platform.Ping(ctx); err != nil {
-		t.Fatalf("ping platform test database: %v", err)
-	}
-	if err := target.Ping(ctx); err != nil {
-		t.Fatalf("ping target test database: %v", err)
-	}
+	platform := setupPlatformDB(t, platformURL)
+	setupTargetDB(t, targetURL)
 	targetConfig, err := pgxpool.ParseConfig(targetURL)
 	if err != nil {
 		t.Fatalf("parse target test database URL: %v", err)
@@ -135,7 +117,7 @@ func TestPostgresManagerIntegration(t *testing.T) {
 	if _, err := rand.Read(key); err != nil {
 		t.Fatalf("generate encryption key: %v", err)
 	}
-	encryptedPassword, err := encryptTestPassword(key, "test")
+	encryptedPassword, err := encryptTestPassword(key, targetConfig.ConnConfig.Password)
 	if err != nil {
 		t.Fatalf("encrypt target password: %v", err)
 	}
@@ -154,14 +136,12 @@ func TestPostgresManagerIntegration(t *testing.T) {
 	).Scan(&dbID); err != nil {
 		t.Fatalf("create database connection fixture: %v", err)
 	}
-	t.Cleanup(func() {
-		_, _ = platform.Exec(context.Background(), `DELETE FROM db_connections WHERE id = $1`, dbID)
-	})
 
 	manager, err := NewPostgresManager(platform, key)
 	if err != nil {
 		t.Fatalf("create postgres manager: %v", err)
 	}
+	t.Cleanup(func() { manager.Invalidate(dbID) })
 	first, err := manager.Pool(ctx, dbID)
 	if err != nil {
 		t.Fatalf("open target pool through manager: %v", err)
@@ -186,7 +166,6 @@ func TestPostgresManagerIntegration(t *testing.T) {
 	if third == first {
 		t.Fatal("manager returned the invalidated pool")
 	}
-	manager.Invalidate(dbID)
 }
 
 func encryptTestPassword(key []byte, password string) ([]byte, error) {

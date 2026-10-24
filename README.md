@@ -89,25 +89,10 @@ Semua error dikembalikan dalam format `{"error": "pesan"}`, dengan status 400 (i
 Pastikan `test-db` berjalan, lalu:
 
 ```
-export TEST_DATABASE_URL='postgres://test:test@localhost:5434/test?sslmode=disable'
 go test ./... -count=1
 ```
 
-Test integrasi dbmanager, viewer, dan migration butuh schema internal yang sudah diterapkan dan environment variable sendiri:
-
-```
-docker compose exec -T test-db psql -U test -d test -c 'DROP SCHEMA IF EXISTS c_test CASCADE; CREATE SCHEMA c_test'
-(echo 'SET search_path=c_test;'; cat migrations/001_init.sql) | docker compose exec -T test-db psql -v ON_ERROR_STOP=1 -U test -d test
-
-export PLATFORM_TEST_URL='postgres://test:test@localhost:5434/test?sslmode=disable&search_path=c_test'
-export TARGET_TEST_URL='postgres://test:test@localhost:5434/test?sslmode=disable'
-POSTGRES_MANAGER_TEST_DATABASE_URL=$PLATFORM_TEST_URL POSTGRES_MANAGER_TEST_TARGET_URL=$TARGET_TEST_URL \
-VIEWER_TEST_DATABASE_URL=$PLATFORM_TEST_URL VIEWER_TEST_TARGET_URL=$TARGET_TEST_URL \
-MIGRATION_TEST_DATABASE_URL=$PLATFORM_TEST_URL MIGRATION_TEST_TARGET_URL=$TARGET_TEST_URL \
-go test ./internal/dbmanager ./internal/migration -count=1 -v
-
-docker compose exec -T test-db psql -U test -d test -c 'DROP SCHEMA c_test CASCADE'
-```
+Untuk menunjuk database lain, set `TEST_DATABASE_URL` (default `postgres://test:test@localhost:5434/test?sslmode=disable`).
 
 Frontend: `cd frontend && npm run build && npm run lint`.
 
