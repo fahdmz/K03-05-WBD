@@ -81,6 +81,32 @@ Perintah berikut memakai PowerShell dari root repository. Jangan menimpa `.env` 
    ```
 6. Buka http://localhost:5173 dan login dengan akun admin awal dari `.env` (default `admin` / `admin123`). Akun ini dibuat otomatis saat server pertama kali dijalankan.
 
+### Menjalankan integration test
+
+Pastikan database lokal sudah hidup dan schema internal sudah dibuat. Di PowerShell:
+
+```powershell
+$env:VIEWER_TEST_DATABASE_URL = "postgres://platform:platform@localhost:5435/platform?sslmode=disable"
+$env:VIEWER_TEST_TARGET_URL = "postgres://test:test@localhost:5434/test?sslmode=disable"
+$env:MIGRATION_TEST_DATABASE_URL = $env:VIEWER_TEST_DATABASE_URL
+$env:MIGRATION_TEST_TARGET_URL = $env:VIEWER_TEST_TARGET_URL
+$env:POSTGRES_MANAGER_TEST_DATABASE_URL = $env:VIEWER_TEST_DATABASE_URL
+$env:POSTGRES_MANAGER_TEST_TARGET_URL = $env:VIEWER_TEST_TARGET_URL
+go test ./...
+```
+
+Tanpa environment variable tersebut, integration test akan dilewati (`SKIP`), bukan dianggap berhasil.
+
+### Catatan pencatatan migration
+
+Database target dan database internal adalah dua database yang berbeda. SQL migration di-commit
+lebih dahulu pada database target, lalu status dan riwayatnya dicatat di database internal.
+Keduanya tidak berada dalam satu transaksi atomik lintas database. Jika target berhasil commit
+tetapi pencatatan riwayat internal gagal, perubahan target sudah terjadi sementara riwayat bisa
+belum menunjukkan status `success`. Server mengembalikan error secara eksplisit agar kondisi ini
+dapat ditindaklanjuti; aplikasi tidak mengklaim kedua commit tersebut atomik.
+
+Untuk mereset database dari nol:
 Untuk mereset database dari nol (menghapus seluruh data platform dan target pada volume Compose):
 
 ```
