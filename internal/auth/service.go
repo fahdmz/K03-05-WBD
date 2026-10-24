@@ -41,7 +41,7 @@ func (s *Service) RevokeUserSessions(ctx context.Context, userID int64) error {
 
 func (s *Service) RotateUserSessions(ctx context.Context, userID int64) error {
 	_, err := s.pool.Exec(ctx, `
-		UPDATE sessions SET last_rotated_at = 'epoch'::timestampz
+		UPDATE sessions SET last_rotated_at = 'epoch'::timestamptz
 		WHERE user_id = $1 AND revoked_at IS NULL
 	`, userID)
 	return err
