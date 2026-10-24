@@ -26,8 +26,11 @@ export default function Button({
     return (
         <button
             {...rest}
+            type={type}
+            disabled={disabled || loading}
+            className={`rounded px-4 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50 ${styles[variant]} ${className}`}
         >
             {loading ? 'Memproses...' : children}
-        </button>
+        </button >
     )
 }
