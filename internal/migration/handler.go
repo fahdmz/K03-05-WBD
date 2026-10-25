@@ -38,6 +38,7 @@ func NewHandler(platform *pgxpool.Pool, manager dbmanager.Manager, authorizer au
 // Register pasang semua route API buat migration
 // Middleware login dipasang dari luar fungsi ini.
 func (h *Handler) Register(mux *http.ServeMux) {
+	mux.HandleFunc("POST /api/databases/{id}/explain", h.explain) // buat bonus ya ma
 	mux.HandleFunc("GET /api/databases/{id}/migrations", h.list)
 	mux.HandleFunc("POST /api/databases/{id}/migrations", h.create)
 	mux.HandleFunc("GET /api/migrations/{id}", h.get)
