@@ -35,7 +35,7 @@ export async function api<T>(path: string, options: Options = {}): Promise<T> {
         headers['X-CSRF-Token'] = csrfToken
     }
 
-    const res = await fetch('api' + path, {
+    const res = await fetch('/api' + path, {
         method,
         headers,
         credentials: 'include',
@@ -61,4 +61,8 @@ export async function api<T>(path: string, options: Options = {}): Promise<T> {
         return undefined as T
     }
     return res.json()
+}
+
+export function errorMessage(err: unknown): string {
+    return err instanceof ApiError ? err.message : 'Tidak dapat terhubung ke server'
 }
