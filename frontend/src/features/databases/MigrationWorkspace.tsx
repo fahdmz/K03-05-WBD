@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { api, ApiError } from '../../lib/api'
+import ExplainPanel from './ExplainPanel'
 
 type DatabaseSummary = {
     id: number
@@ -206,6 +207,7 @@ export default function MigrationWorkspace({ database }: { database: DatabaseSum
                             <p className="text-xs text-slate-500">Draft belum mengubah database target. Perubahan berlaku setelah dieksekusi.</p>
                             <button type="submit" disabled={saving || !title.trim() || !sql.trim()} className="rounded-lg bg-cyan-800 px-4 py-2 text-sm font-semibold text-white hover:bg-cyan-700 disabled:cursor-not-allowed disabled:opacity-50">{saving ? 'Menyimpan…' : 'Simpan draft'}</button>
                         </div>
+                        {canEdit && <ExplainPanel key={`${database.id}:${sql}`} databaseId={database.id} sql={sql} />}
                     </form>
                 ) : selected ? (
                     <div className="space-y-5">
@@ -231,6 +233,7 @@ export default function MigrationWorkspace({ database }: { database: DatabaseSum
                             <h3 className="mb-2 text-sm font-semibold text-slate-700">SQL migration</h3>
                             <pre className="max-h-[560px] overflow-auto rounded-xl bg-slate-950 p-4 font-mono text-sm leading-6 text-slate-100"><code>{selected.sql}</code></pre>
                         </div>
+                        {canEdit && <ExplainPanel key={`${database.id}:${selected.id}:${selected.sql}`} databaseId={database.id} sql={selected.sql} />}
                     </div>
                 ) : (
                     <div className="flex min-h-64 flex-col items-center justify-center text-center">
