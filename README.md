@@ -84,6 +84,14 @@ Rotasi tidak memperpanjang absolute expiration. Logout dan pencabutan akses mema
 
 Semua error dikembalikan dalam format `{"error": "pesan"}`, dengan status 400 (input tidak valid), 401 (belum login), 403 (tidak punya akses atau CSRF salah), 404, 409 (data konflik), 500, dan 502 (koneksi ke database target gagal).
 
+## Bonus: execution plan
+
+User dengan akses Edit dapat memilih **Lihat execution plan** pada editor SQL atau detail migration. Endpoint `POST /api/databases/{id}/explain` menerima `{"sql":"SELECT ..."}` dan memerlukan session serta header CSRF seperti endpoint POST lainnya.
+
+Hasil menampilkan pohon operasi, scan, index, jenis join, estimated cost, dan estimated rows. Cost merupakan estimasi planner, bukan waktu dalam milidetik. JSON lengkap tersedia untuk inspeksi. Hasil dibersihkan ketika SQL diganti agar plan lama tidak dianggap berlaku untuk query baru.
+
+Analisis memakai `EXPLAIN (FORMAT JSON, ANALYZE FALSE)` untuk satu statement; input multi-statement ditolak melalui extended protocol PostgreSQL. SELECT, INSERT, UPDATE, dan DELETE dapat dianalisis; CREATE TABLE dan ALTER TABLE tidak didukung. Tidak ada actual time/actual rows karena ANALYZE tidak digunakan. Transaksi target read-only, statement timeout 5 detik, lock timeout 2 detik, dan context timeout 8 detik membatasi proses analisis. EXPLAIN tidak membuat versi atau riwayat migration.
+
 ## Menjalankan test
 
 Pastikan `test-db` berjalan, lalu:
