@@ -10,8 +10,6 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-var ErrNotImplemented = errors.New("history: belum diimplementasikan")
-
 type Action string
 
 const (
@@ -89,18 +87,82 @@ func BuildPlan(ctx context.Context, q store.Querier, changeRequestID int64) (Pla
 		p.Batch = &Batch{Table: *batchTable, Column: *batchColumn, Size: *batchSize}
 	}
 
+	useDown := func() error {
+		if sqlDown == nil {
+			return ErrIrreversible
+		}
+		p.Direction = Down
+		p.SQL = *sqlDown
+		return nil
+	}
+
 	switch p.Action {
 	case Apply:
 		p.Direction = Up
-		return p, nil
+	case Rollback:
+		t, err := CheckRollback(ctx, q, p.MigrationID)
+		if err != nil {
+			return Plan{}, err
+		}
+		if p.TargetExecutionID == nil || *p.TargetExecutionID != t.ExecutionID {
+			return Plan{}, ErrStale
+		}
+		if err := useDown(); err != nil {
+			return Plan{}, err
+		}
+		p.RevertsExecutionID = p.TargetExecutionID
+	case Forward:
+		if _, err := CheckForward(ctx, q, p.MigrationID); err != nil {
+			return Plan{}, err
+		}
+		p.Direction = Up
+	case Resume, Revert:
+		if p.TargetExecutionID == nil {
+			return Plan{}, fmt.Errorf("%s butuh execution ID tujuan", p.Action)
+		}
+		orig, origTarget, err := originalAction(ctx, q, *p.TargetExecutionID)
+		if err != nil {
+			return Plan{}, err
+		}
+		goesDown := orig == Rollback
+		if p.Action == Revert {
+			goesDown = !goesDown
+		}
+		if goesDown {
+			if err := useDown(); err != nil {
+				return Plan{}, err
+			}
+		} else {
+			p.Direction = Up
+		}
+		if p.Action == Resume && orig == Rollback {
+			p.RevertsExecutionID = origTarget
+		}
 	default:
-		return Plan{}, ErrNotImplemented
+		return Plan{}, fmt.Errorf("aksi %q tidak dikenal", p.Action)
 	}
+	return p, nil
 }
 
 func Record(ctx context.Context, tx pgx.Tx, r Result) error {
-	if r.Plan.Action != Apply {
-		return ErrNotImplemented
+	action := r.Plan.Action
+	reverts := r.Plan.RevertsExecutionID
+
+	if action == Revert {
+		return nil
+	}
+	if action == Resume {
+		if r.Plan.TargetExecutionID == nil {
+			return errors.New("resume butuh execution ID tujuan")
+		}
+		orig, origTarget, err := originalAction(ctx, tx, *r.Plan.TargetExecutionID)
+		if err != nil {
+			return err
+		}
+		action = orig
+		if orig == Rollback {
+			reverts = origTarget
+		}
 	}
 
 	var version *int
@@ -108,21 +170,37 @@ func Record(ctx context.Context, tx pgx.Tx, r Result) error {
 	if err != nil {
 		return fmt.Errorf("kunci migration %d: %w", r.Plan.MigrationID, err)
 	}
-	if version == nil {
-		var next int
-		err := tx.QueryRow(ctx, `
-			SELECT COALESCE(MAX(version), 0) + 1 FROM migrations WHERE db_connection_id = $1`,
-			r.Plan.DatabaseID,
-		).Scan(&next)
-		if err != nil {
-			return fmt.Errorf("hitung versi baru: %w", err)
+
+	applied := true
+	switch action {
+	case Apply:
+		if version == nil {
+			var next int
+			err := tx.QueryRow(ctx, `
+				SELECT COALESCE(MAX(version), 0) + 1 FROM migrations WHERE db_connection_id = $1`,
+				r.Plan.DatabaseID,
+			).Scan(&next)
+			if err != nil {
+				return fmt.Errorf("hitung versi baru: %w", err)
+			}
+			version = &next
 		}
-		version = &next
+	case Forward:
+		if version == nil {
+			return ErrNeverApplied
+		}
+	case Rollback:
+		if version == nil {
+			return ErrNotApplied
+		}
+		applied = false
+	default:
+		return fmt.Errorf("aksi %q tidak dicatat di history", action)
 	}
 
 	if _, err := tx.Exec(ctx, `
-		UPDATE migrations SET version = $2, is_applied = TRUE WHERE id = $1`,
-		r.Plan.MigrationID, *version,
+		UPDATE migrations SET version = $2, is_applied = $3 WHERE id = $1`,
+		r.Plan.MigrationID, *version, applied,
 	); err != nil {
 		return fmt.Errorf("update posisi migration: %w", err)
 	}
@@ -134,7 +212,7 @@ func Record(ctx context.Context, tx pgx.Tx, r Result) error {
 			requested_by, started_at, committed_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
 		r.ExecutionID, r.Plan.DatabaseID, r.Plan.MigrationID, r.Plan.RevisionID, *version,
-		string(r.Plan.Action), r.Plan.RevertsExecutionID, r.ExecutedSQL, r.Plan.Mode,
+		string(action), reverts, r.ExecutedSQL, r.Plan.Mode,
 		r.Batches, r.RowsAffected, r.Plan.RequestedBy, r.StartedAt, r.CommittedAt,
 	)
 	if err != nil {
