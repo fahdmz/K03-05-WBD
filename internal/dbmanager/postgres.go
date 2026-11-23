@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/fahdmz/K03-05-WBD/internal/obs"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -219,6 +220,7 @@ func targetPoolConfig(cfg ConnConfig) (*pgxpool.Config, error) {
 		return nil, errors.New("invalid target database connection settings")
 	}
 	parsed.MaxConns = 5
+	parsed.ConnConfig.Tracer = obs.PgxTracer()
 	return parsed, nil
 }
 
