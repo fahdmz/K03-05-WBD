@@ -16,6 +16,9 @@ import (
 
 const maxPageSize int64 = 100
 
+// schema bukti eksekusi worker, nggak boleh kelihatan di viewer
+const hiddenSchema = "_platform"
+
 type Viewer struct {
 	platform   *pgxpool.Pool
 	manager    Manager
@@ -98,9 +101,9 @@ func (v *Viewer) listSchemas(w http.ResponseWriter, r *http.Request) {
 	rows, err := pool.Query(r.Context(), `
 		SELECT schema_name
 		FROM information_schema.schemata
-		WHERE schema_name NOT IN ('pg_catalog', 'information_schema')
+		WHERE schema_name NOT IN ('pg_catalog', 'information_schema', $1)
 		  AND schema_name NOT LIKE 'pg_toast%'
-		ORDER BY schema_name`)
+		ORDER BY schema_name`, hiddenSchema)
 	if err != nil {
 		writeTargetError(w, err)
 		return
@@ -386,6 +389,10 @@ func (v *Viewer) authorizedSchemaPool(w http.ResponseWriter, r *http.Request) (*
 	schema := r.PathValue("schema")
 	if schema == "" {
 		web.WriteError(w, http.StatusBadRequest, "Schema tidak valid")
+		return nil, "", false
+	}
+	if schema == hiddenSchema {
+		web.WriteError(w, http.StatusNotFound, "Schema tidak ditemukan")
 		return nil, "", false
 	}
 	return pool, schema, true
