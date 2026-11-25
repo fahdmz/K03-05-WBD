@@ -13,6 +13,7 @@ import (
 	"github.com/fahdmz/K03-05-WBD/internal/migration"
 	"github.com/fahdmz/K03-05-WBD/internal/obs"
 	"github.com/fahdmz/K03-05-WBD/internal/store"
+	"github.com/fahdmz/K03-05-WBD/internal/workflow"
 	"github.com/jackc/pgx/v5"
 	"github.com/joho/godotenv"
 )
@@ -101,10 +102,13 @@ func main() {
 	databaseMux := http.NewServeMux()
 	dbmanager.NewViewer(db, manager, authorizer).Register(databaseMux)
 	migration.NewHandler(db, manager, authorizer).Register(databaseMux)
+	workflow.NewHandler(db, authorizer).Register(databaseMux)
 	databaseRoutes := auth.RequireLogin(databaseMux)
 	mux.Handle("/api/databases", databaseRoutes)
 	mux.Handle("/api/databases/", databaseRoutes)
 	mux.Handle("/api/migrations/", databaseRoutes)
+	mux.Handle("/api/reviews", databaseRoutes)
+	mux.Handle("/api/change-requests/", databaseRoutes)
 
 	slog.Info("server.started", "addr", ":8080")
 	if err := http.ListenAndServe(":8080", obs.HTTPMiddleware(mux)); err != nil {
