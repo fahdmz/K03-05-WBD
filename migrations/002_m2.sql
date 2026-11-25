@@ -90,32 +90,42 @@ CREATE TABLE database_locks (
 
 CREATE TABLE migration_history (
     id BIGSERIAL PRIMARY KEY,
-    execution_id UUID NOT NULL UNIQUE,
+    execution_id UUID NOT NULL,
+    attempt INT NOT NULL CHECK (attempt >= 1),
     db_connection_id BIGINT NOT NULL REFERENCES db_connections(id) ON DELETE CASCADE,
     migration_id BIGINT NOT NULL REFERENCES migrations(id) ON DELETE CASCADE,
     revision_id BIGINT NOT NULL REFERENCES migration_revisions(id),
-    version INT NOT NULL,
-    action TEXT NOT NULL CHECK (action IN ('apply', 'rollback', 'forward')),
-    reverts_execution_id UUID REFERENCES migration_history(execution_id),
+    version INT,
+    action TEXT NOT NULL CHECK (action IN ('apply', 'rollback', 'forward', 'revert')),
+    status TEXT NOT NULL CHECK (status IN ('success', 'failed', 'partial')),
+    reverts_execution_id UUID,
     executed_sql TEXT NOT NULL,
     mode TEXT NOT NULL,
     batches INT,
     rows_affected BIGINT,
+    error_message TEXT,
+    sqlstate TEXT,
     requested_by BIGINT NOT NULL REFERENCES users(id),
     started_at TIMESTAMPTZ NOT NULL,
-    committed_at TIMESTAMPTZ NOT NULL
+    finished_at TIMESTAMPTZ NOT NULL,
+    UNIQUE (execution_id, attempt),
+    CHECK (status <> 'success' OR action = 'revert' OR version IS NOT NULL)
 );
-CREATE INDEX migration_history_db_idx ON migration_history (db_connection_id, committed_at, id);
+CREATE UNIQUE INDEX migration_history_one_success_idx ON migration_history (execution_id) WHERE status = 'success';
+CREATE INDEX migration_history_db_idx ON migration_history (db_connection_id, finished_at, id);
 
-CREATE FUNCTION reject_history_update() RETURNS trigger AS $$
+CREATE FUNCTION reject_history_change() RETURNS trigger AS $$
 BEGIN
-    RAISE EXCEPTION 'migration_history tidak boleh diubah';
+    IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1 THEN
+        RETURN OLD;
+    END IF;
+    RAISE EXCEPTION 'migration_history tidak boleh diubah atau dihapus';
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER migration_history_no_update
-    BEFORE UPDATE ON migration_history
-    FOR EACH ROW EXECUTE FUNCTION reject_history_update();
+CREATE TRIGGER migration_history_immutable
+    BEFORE UPDATE OR DELETE ON migration_history
+    FOR EACH ROW EXECUTE FUNCTION reject_history_change();
 
 INSERT INTO migration_revisions (
     migration_id, revision_no, status, sql_up, irreversible, irreversible_reason,
@@ -134,12 +144,12 @@ FROM migration_revisions r
 WHERE r.migration_id = m.id AND r.revision_no = 1;
 
 INSERT INTO migration_history (
-    execution_id, db_connection_id, migration_id, revision_id, version, action,
-    executed_sql, mode, requested_by, started_at, committed_at
+    execution_id, attempt, db_connection_id, migration_id, revision_id, version, action, status,
+    executed_sql, mode, error_message, requested_by, started_at, finished_at
 )
-SELECT gen_random_uuid(), m.db_connection_id, m.id, m.current_revision_id, m.version, 'apply',
-       m.sql, 'normal', COALESCE(m.executed_by, m.created_by), m.executed_at, m.executed_at
+SELECT gen_random_uuid(), 1, m.db_connection_id, m.id, m.current_revision_id, m.version, 'apply', m.status,
+       m.sql, 'normal', m.error_message, COALESCE(m.executed_by, m.created_by), m.executed_at, m.executed_at
 FROM migrations m
-WHERE m.status = 'success';
+WHERE m.status IN ('success', 'failed');
 
 COMMIT;

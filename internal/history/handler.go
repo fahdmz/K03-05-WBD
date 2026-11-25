@@ -41,19 +41,23 @@ func (h *Handler) Register(mux *http.ServeMux) {
 
 type Entry struct {
 	ExecutionID        string    `json:"executionId"`
+	Attempt            int       `json:"attempt"`
 	MigrationID        int64     `json:"migrationId"`
 	Title              string    `json:"title"`
-	Version            int       `json:"version"`
+	Version            *int      `json:"version"`
 	RevisionNo         int       `json:"revisionNo"`
 	Action             string    `json:"action"`
+	Status             string    `json:"status"`
 	RevertsExecutionID *string   `json:"revertsExecutionId"`
 	ExecutedSQL        string    `json:"executedSql"`
 	Mode               string    `json:"mode"`
 	Batches            *int      `json:"batches"`
 	RowsAffected       *int64    `json:"rowsAffected"`
+	ErrorMessage       *string   `json:"errorMessage"`
+	SQLState           *string   `json:"sqlstate"`
 	RequestedBy        string    `json:"requestedBy"`
 	StartedAt          time.Time `json:"startedAt"`
-	CommittedAt        time.Time `json:"committedAt"`
+	FinishedAt         time.Time `json:"finishedAt"`
 }
 
 type Job struct {
@@ -80,14 +84,14 @@ type Job struct {
 func HideRollback(entries []Entry) []Entry {
 	hidden := map[string]bool{}
 	for _, e := range entries {
-		if e.Action == string(Rollback) && e.RevertsExecutionID != nil {
+		if e.Action == string(Rollback) && e.Status == string(Succeeded) && e.RevertsExecutionID != nil {
 			hidden[e.ExecutionID] = true
 			hidden[*e.RevertsExecutionID] = true
 		}
 	}
 	out := make([]Entry, 0, len(entries))
 	for _, e := range entries {
-		if !hidden[e.ExecutionID] {
+		if e.Status != string(Succeeded) || !hidden[e.ExecutionID] {
 			out = append(out, e)
 		}
 	}
@@ -269,15 +273,15 @@ func (h *Handler) listHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := h.platform.Query(ctx, `
-		SELECT h.execution_id::text, h.migration_id, m.title, h.version, rv.revision_no, h.action,
-		       h.reverts_execution_id::text, h.executed_sql, h.mode, h.batches, h.rows_affected,
-		       u.username, h.started_at, h.committed_at
+		SELECT h.execution_id::text, h.attempt, h.migration_id, m.title, h.version, rv.revision_no,
+		       h.action, h.status, h.reverts_execution_id::text, h.executed_sql, h.mode, h.batches,
+		       h.rows_affected, h.error_message, h.sqlstate, u.username, h.started_at, h.finished_at
 		FROM migration_history h
 		JOIN migrations m ON m.id = h.migration_id
 		JOIN migration_revisions rv ON rv.id = h.revision_id
 		JOIN users u ON u.id = h.requested_by
 		WHERE h.db_connection_id = $1
-		ORDER BY h.committed_at, h.id`, databaseID)
+		ORDER BY h.finished_at, h.id`, databaseID)
 	if err != nil {
 		web.WriteError(w, http.StatusInternalServerError, "Gagal membaca migration history")
 		return
@@ -288,9 +292,9 @@ func (h *Handler) listHistory(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var e Entry
 		if err := rows.Scan(
-			&e.ExecutionID, &e.MigrationID, &e.Title, &e.Version, &e.RevisionNo, &e.Action,
-			&e.RevertsExecutionID, &e.ExecutedSQL, &e.Mode, &e.Batches, &e.RowsAffected,
-			&e.RequestedBy, &e.StartedAt, &e.CommittedAt,
+			&e.ExecutionID, &e.Attempt, &e.MigrationID, &e.Title, &e.Version, &e.RevisionNo,
+			&e.Action, &e.Status, &e.RevertsExecutionID, &e.ExecutedSQL, &e.Mode, &e.Batches,
+			&e.RowsAffected, &e.ErrorMessage, &e.SQLState, &e.RequestedBy, &e.StartedAt, &e.FinishedAt,
 		); err != nil {
 			web.WriteError(w, http.StatusInternalServerError, "Gagal membaca migration history")
 			return

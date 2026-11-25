@@ -107,7 +107,7 @@ func main() {
 	mux.Handle("/api/databases", databaseRoutes)
 	mux.Handle("/api/databases/", databaseRoutes)
 	mux.Handle("/api/migrations/", databaseRoutes)
-	mux.Handle("/api/jobs", databaseRoutes)
+	mux.Handle("/api/jobs/", databaseRoutes)
 
 	slog.Info("server.started", "addr", ":8080")
 	if err := http.ListenAndServe(":8080", obs.HTTPMiddleware(mux)); err != nil {

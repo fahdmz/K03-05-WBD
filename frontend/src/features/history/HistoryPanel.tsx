@@ -4,18 +4,31 @@ import { api, errorMessage } from '../../lib/api'
 import { formatDate } from '../../lib/format'
 import { useToast } from '../../lib/toast'
 import { computePositions } from './position'
-import type { CreatedRequest, HistoryAction, HistoryEntry } from './types'
+import type { CreatedRequest, HistoryAction, HistoryEntry, HistoryStatus } from './types'
 
 const actionLabel: Record<HistoryAction, string> = {
     apply: 'Apply',
     rollback: 'Rollback',
     forward: 'Forward',
+    revert: 'Revert batch',
 }
 
 const actionStyle: Record<HistoryAction, string> = {
     apply: 'bg-emerald-50 text-emerald-700',
     rollback: 'bg-amber-50 text-amber-800',
     forward: 'bg-cyan-50 text-cyan-800',
+    revert: 'bg-violet-50 text-violet-800',
+}
+
+const statusBadge: Record<Exclude<HistoryStatus, 'success'>, { label: string; style: string }> = {
+    failed: { label: 'Failed', style: 'bg-rose-50 text-rose-700' },
+    partial: { label: 'Partial', style: 'bg-amber-50 text-amber-800' },
+}
+
+const cardBorder: Record<HistoryStatus, string> = {
+    success: 'border-slate-200',
+    failed: 'border-rose-300',
+    partial: 'border-amber-300',
 }
 
 type Props = {
@@ -131,41 +144,58 @@ export default function HistoryPanel({ databaseId, canEdit }: Props) {
                 </p>
             ) : (
                 <ol className="space-y-3">
-                    {entries.map((entry) => (
-                        <li key={entry.executionId} className="rounded-xl border border-slate-200 bg-white p-4">
-                            <div className="flex flex-wrap items-center gap-2">
-                                <span className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${actionStyle[entry.action]}`}>
-                                    {actionLabel[entry.action]}
-                                </span>
-                                <span className="font-semibold text-slate-900">
-                                    v{entry.version} {entry.title}
-                                </span>
-                                <span className="text-xs text-slate-500">
-                                    revisi {entry.revisionNo}
-                                    {entry.mode === 'batch' ? ` · ${entry.batches ?? 0} batch` : ''}
-                                </span>
-                            </div>
-                            <p className="mt-2 text-xs text-slate-500">
-                                {entry.requestedBy} · {formatDate(entry.committedAt)}
-                                {entry.rowsAffected !== null ? ` · ${entry.rowsAffected.toLocaleString('id-ID')} baris` : ''}
-                            </p>
-                            <p className="mt-1 break-all font-mono text-[11px] text-slate-400">
-                                execution {entry.executionId}
-                                {entry.revertsExecutionId ? ` · membatalkan ${entry.revertsExecutionId}` : ''}
-                            </p>
-                            <button
-                                onClick={() => setExpanded(expanded === entry.executionId ? null : entry.executionId)}
-                                className="mt-2 text-xs font-semibold text-cyan-800"
-                            >
-                                {expanded === entry.executionId ? 'Sembunyikan SQL' : 'Lihat SQL'}
-                            </button>
-                            {expanded === entry.executionId && (
-                                <pre className="mt-2 max-h-64 overflow-auto rounded-lg bg-slate-900 p-3 text-xs text-slate-100">
-                                    {entry.executedSql}
-                                </pre>
-                            )}
-                        </li>
-                    ))}
+                    {entries.map((entry) => {
+                        const key = `${entry.executionId}-${entry.attempt}`
+                        return (
+                            <li key={key} className={`rounded-xl border bg-white p-4 ${cardBorder[entry.status]}`}>
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <span className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${actionStyle[entry.action]}`}>
+                                        {actionLabel[entry.action]}
+                                    </span>
+                                    {entry.status !== 'success' && (
+                                        <span
+                                            className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${statusBadge[entry.status].style}`}
+                                        >
+                                            {statusBadge[entry.status].label}
+                                        </span>
+                                    )}
+                                    <span className="font-semibold text-slate-900">
+                                        {entry.version !== null ? `v${entry.version} ` : ''}
+                                        {entry.title}
+                                    </span>
+                                    <span className="text-xs text-slate-500">
+                                        revisi {entry.revisionNo} · attempt {entry.attempt}
+                                        {entry.mode === 'batch' ? ` · ${entry.batches ?? 0} batch` : ''}
+                                    </span>
+                                </div>
+                                <p className="mt-2 text-xs text-slate-500">
+                                    {entry.requestedBy} · {formatDate(entry.finishedAt)}
+                                    {entry.rowsAffected !== null ? ` · ${entry.rowsAffected.toLocaleString('id-ID')} baris` : ''}
+                                </p>
+                                <p className="mt-1 break-all font-mono text-[11px] text-slate-400">
+                                    execution {entry.executionId}
+                                    {entry.revertsExecutionId ? ` · membatalkan ${entry.revertsExecutionId}` : ''}
+                                </p>
+                                {entry.errorMessage && (
+                                    <div className="mt-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
+                                        {entry.sqlstate ? `SQLSTATE ${entry.sqlstate}: ` : ''}
+                                        {entry.errorMessage}
+                                    </div>
+                                )}
+                                <button
+                                    onClick={() => setExpanded(expanded === key ? null : key)}
+                                    className="mt-2 text-xs font-semibold text-cyan-800"
+                                >
+                                    {expanded === key ? 'Sembunyikan SQL' : 'Lihat SQL'}
+                                </button>
+                                {expanded === key && (
+                                    <pre className="mt-2 max-h-64 overflow-auto rounded-lg bg-slate-900 p-3 text-xs text-slate-100">
+                                        {entry.executedSql}
+                                    </pre>
+                                )}
+                            </li>
+                        )
+                    })}
                 </ol>
             )}
         </div>
