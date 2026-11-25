@@ -84,11 +84,14 @@ func CheckRollback(ctx context.Context, q store.Querier, migrationID int64) (Tar
 		FROM migration_history h
 		JOIN migration_revisions r ON r.id = h.revision_id
 		WHERE h.migration_id = $1
+		  AND h.status = 'success'
 		  AND h.action IN ('apply', 'forward')
 		  AND NOT EXISTS (
-		      SELECT 1 FROM migration_history x WHERE x.reverts_execution_id = h.execution_id
+		      SELECT 1 FROM migration_history x
+		      WHERE x.action = 'rollback' AND x.status = 'success'
+		        AND x.reverts_execution_id = h.execution_id
 		  )
-		ORDER BY h.committed_at DESC, h.id DESC
+		ORDER BY h.finished_at DESC, h.id DESC
 		LIMIT 1`,
 		migrationID,
 	).Scan(&t.ExecutionID, &t.RevisionID, &irreversible)
@@ -136,8 +139,8 @@ func CheckForward(ctx context.Context, q store.Querier, migrationID int64) (Targ
 	t := Target{DatabaseID: s.databaseID, MigrationID: migrationID}
 	err = q.QueryRow(ctx, `
 		SELECT revision_id FROM migration_history
-		WHERE migration_id = $1 AND action IN ('apply', 'forward')
-		ORDER BY committed_at DESC, id DESC
+		WHERE migration_id = $1 AND status = 'success' AND action IN ('apply', 'forward')
+		ORDER BY finished_at DESC, id DESC
 		LIMIT 1`,
 		migrationID,
 	).Scan(&t.RevisionID)
@@ -150,7 +153,24 @@ func CheckForward(ctx context.Context, q store.Querier, migrationID int64) (Targ
 	return t, nil
 }
 
-func originalAction(ctx context.Context, q store.Querier, executionID string) (Action, *string, error) {
+type origin struct {
+	action    Action
+	direction Direction
+	target    *string
+	root      string
+}
+
+func opposite(d Direction) Direction {
+	if d == Up {
+		return Down
+	}
+	return Up
+}
+
+func traceOrigin(ctx context.Context, q store.Querier, executionID string, depth int) (origin, error) {
+	if depth > 20 {
+		return origin{}, fmt.Errorf("rantai eksekusi %s terlalu dalam", executionID)
+	}
 	var action string
 	var target *string
 	err := q.QueryRow(ctx, `
@@ -161,10 +181,30 @@ func originalAction(ctx context.Context, q store.Querier, executionID string) (A
 		executionID,
 	).Scan(&action, &target)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", nil, fmt.Errorf("eksekusi %s tidak ditemukan", executionID)
+		return origin{action: Apply, direction: Up, root: executionID}, nil
 	}
 	if err != nil {
-		return "", nil, fmt.Errorf("baca eksekusi %s: %w", executionID, err)
+		return origin{}, fmt.Errorf("baca eksekusi %s: %w", executionID, err)
 	}
-	return Action(action), target, nil
+
+	switch a := Action(action); a {
+	case Apply, Forward:
+		return origin{action: a, direction: Up, target: target, root: executionID}, nil
+	case Rollback:
+		return origin{action: a, direction: Down, target: target, root: executionID}, nil
+	case Resume, Revert:
+		if target == nil {
+			return origin{}, fmt.Errorf("eksekusi %s tidak punya execution ID tujuan", executionID)
+		}
+		o, err := traceOrigin(ctx, q, *target, depth+1)
+		if err != nil {
+			return origin{}, err
+		}
+		if a == Resume {
+			return o, nil
+		}
+		return origin{action: Revert, direction: opposite(o.direction), target: target, root: o.root}, nil
+	default:
+		return origin{}, fmt.Errorf("aksi %q pada eksekusi %s tidak dikenal", action, executionID)
+	}
 }

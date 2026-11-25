@@ -10,6 +10,7 @@ export type MigrationPosition = {
 export function computePositions(entries: HistoryEntry[]) {
     const latest = new Map<number, MigrationPosition>()
     for (const entry of entries) {
+        if (entry.status !== 'success' || entry.action === 'revert' || entry.version === null) continue
         latest.set(entry.migrationId, {
             migrationId: entry.migrationId,
             title: entry.title,

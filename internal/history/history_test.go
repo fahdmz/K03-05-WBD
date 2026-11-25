@@ -137,21 +137,25 @@ func (f *fixture) newMigration(title string, irreversible bool) (int64, int64) {
 	return migrationID, revisionID
 }
 
-func (f *fixture) record(action Action, migrationID, revisionID int64, reverts *string) string {
+func (f *fixture) newExecutionID() string {
 	f.t.Helper()
-	ctx := context.Background()
 	var executionID string
-	if err := f.db.QueryRow(ctx, `SELECT gen_random_uuid()::text`).Scan(&executionID); err != nil {
+	if err := f.db.QueryRow(context.Background(), `SELECT gen_random_uuid()::text`).Scan(&executionID); err != nil {
 		f.t.Fatalf("buat execution id: %v", err)
 	}
+	return executionID
+}
 
+func (f *fixture) attempt(executionID string, attempt int, status Status, action Action, migrationID, revisionID int64, reverts *string) error {
+	f.t.Helper()
+	ctx := context.Background()
 	tx, err := f.db.Begin(ctx)
 	if err != nil {
 		f.t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	now := time.Now()
-	err = Record(ctx, tx, Result{
+
+	r := Result{
 		Plan: Plan{
 			DatabaseID:         f.dbID,
 			MigrationID:        migrationID,
@@ -162,15 +166,27 @@ func (f *fixture) record(action Action, migrationID, revisionID int64, reverts *
 			RevertsExecutionID: reverts,
 		},
 		ExecutionID: executionID,
+		Attempt:     attempt,
+		Status:      status,
 		ExecutedSQL: "SELECT 1",
-		StartedAt:   now,
-		CommittedAt: now,
-	})
-	if err != nil {
-		f.t.Fatalf("record %s: %v", action, err)
+		StartedAt:   time.Now(),
+		FinishedAt:  time.Now(),
 	}
-	if err := tx.Commit(ctx); err != nil {
-		f.t.Fatalf("commit: %v", err)
+	if status != Succeeded {
+		r.ErrorMessage = "connection reset"
+		r.SQLState = "08006"
+	}
+	if err := Record(ctx, tx, r); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (f *fixture) succeed(action Action, migrationID, revisionID int64, reverts *string) string {
+	f.t.Helper()
+	executionID := f.newExecutionID()
+	if err := f.attempt(executionID, 1, Succeeded, action, migrationID, revisionID, reverts); err != nil {
+		f.t.Fatalf("record %s: %v", action, err)
 	}
 	return executionID
 }
@@ -196,11 +212,19 @@ func (f *fixture) history(hide bool) []string {
 	if err := json.NewDecoder(rec.Body).Decode(&entries); err != nil {
 		f.t.Fatalf("decode history: %v", err)
 	}
-	ids := make([]string, len(entries))
+	return labels(entries)
+}
+
+func labels(entries []Entry) []string {
+	out := make([]string, len(entries))
 	for i, e := range entries {
-		ids[i] = e.ExecutionID
+		out[i] = fmt.Sprintf("%s#%d:%s", e.ExecutionID, e.Attempt, e.Status)
 	}
-	return ids
+	return out
+}
+
+func ok(executionID string) string {
+	return executionID + "#1:success"
 }
 
 func assertIDs(t *testing.T, got, want []string) {
@@ -218,18 +242,25 @@ func assertIDs(t *testing.T, got, want []string) {
 func TestHideRollbackExample(t *testing.T) {
 	e2 := "E2"
 	entries := []Entry{
-		{ExecutionID: "E1", Action: "apply"},
-		{ExecutionID: "E2", Action: "apply"},
-		{ExecutionID: "E3", Action: "rollback", RevertsExecutionID: &e2},
-		{ExecutionID: "E4", Action: "forward"},
-		{ExecutionID: "E5", Action: "apply"},
+		{ExecutionID: "E1", Attempt: 1, Action: "apply", Status: "success"},
+		{ExecutionID: "E2", Attempt: 1, Action: "apply", Status: "success"},
+		{ExecutionID: "E3", Attempt: 1, Action: "rollback", Status: "success", RevertsExecutionID: &e2},
+		{ExecutionID: "E4", Attempt: 1, Action: "forward", Status: "success"},
+		{ExecutionID: "E5", Attempt: 1, Action: "apply", Status: "success"},
 	}
-	got := HideRollback(entries)
-	ids := make([]string, len(got))
-	for i, e := range got {
-		ids[i] = e.ExecutionID
+	assertIDs(t, labels(HideRollback(entries)), []string{"E1#1:success", "E4#1:success", "E5#1:success"})
+}
+
+func TestHideRollbackKeepsFailures(t *testing.T) {
+	e2 := "E2"
+	entries := []Entry{
+		{ExecutionID: "E1", Attempt: 1, Action: "apply", Status: "success"},
+		{ExecutionID: "E2", Attempt: 1, Action: "apply", Status: "failed"},
+		{ExecutionID: "E2", Attempt: 2, Action: "apply", Status: "success"},
+		{ExecutionID: "E3", Attempt: 1, Action: "rollback", Status: "failed", RevertsExecutionID: &e2},
+		{ExecutionID: "E3", Attempt: 2, Action: "rollback", Status: "success", RevertsExecutionID: &e2},
 	}
-	assertIDs(t, ids, []string{"E1", "E4", "E5"})
+	assertIDs(t, labels(HideRollback(entries)), []string{"E1#1:success", "E2#1:failed", "E3#1:failed"})
 }
 
 func TestRollbackForwardFlow(t *testing.T) {
@@ -240,8 +271,8 @@ func TestRollbackForwardFlow(t *testing.T) {
 	b, rb := f.newMigration("B", false)
 	c, rc := f.newMigration("C", false)
 
-	e1 := f.record(Apply, a, ra, nil)
-	e2 := f.record(Apply, b, rb, nil)
+	e1 := f.succeed(Apply, a, ra, nil)
+	e2 := f.succeed(Apply, b, rb, nil)
 
 	if _, err := CheckRollback(ctx, f.db, a); !errors.Is(err, ErrNotTop) {
 		t.Fatalf("rollback A saat B aktif: err = %v, want ErrNotTop", err)
@@ -253,7 +284,7 @@ func TestRollbackForwardFlow(t *testing.T) {
 	if target.ExecutionID != e2 {
 		t.Fatalf("target rollback = %s, want %s", target.ExecutionID, e2)
 	}
-	e3 := f.record(Rollback, b, target.RevisionID, &target.ExecutionID)
+	e3 := f.succeed(Rollback, b, target.RevisionID, &target.ExecutionID)
 
 	if _, err := CheckForward(ctx, f.db, c); !errors.Is(err, ErrNeverApplied) {
 		t.Fatalf("forward C yang belum pernah jalan: err = %v, want ErrNeverApplied", err)
@@ -262,11 +293,11 @@ func TestRollbackForwardFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("forward B: %v", err)
 	}
-	e4 := f.record(Forward, b, next.RevisionID, nil)
-	e5 := f.record(Apply, c, rc, nil)
+	e4 := f.succeed(Forward, b, next.RevisionID, nil)
+	e5 := f.succeed(Apply, c, rc, nil)
 
-	assertIDs(t, f.history(false), []string{e1, e2, e3, e4, e5})
-	assertIDs(t, f.history(true), []string{e1, e4, e5})
+	assertIDs(t, f.history(false), []string{ok(e1), ok(e2), ok(e3), ok(e4), ok(e5)})
+	assertIDs(t, f.history(true), []string{ok(e1), ok(e4), ok(e5)})
 
 	var versionB, versionC int
 	f.db.QueryRow(ctx, `SELECT version FROM migrations WHERE id = $1`, b).Scan(&versionB)
@@ -281,7 +312,7 @@ func TestRules(t *testing.T) {
 	ctx := context.Background()
 
 	a, ra := f.newMigration("A", false)
-	f.record(Apply, a, ra, nil)
+	f.succeed(Apply, a, ra, nil)
 	if _, err := CheckForward(ctx, f.db, a); !errors.Is(err, ErrAlreadyApplied) {
 		t.Fatalf("forward migration aktif: err = %v, want ErrAlreadyApplied", err)
 	}
@@ -292,20 +323,20 @@ func TestRules(t *testing.T) {
 	}
 
 	b, rb := f.newMigration("B", false)
-	f.record(Apply, b, rb, nil)
+	f.succeed(Apply, b, rb, nil)
 	target, err := CheckRollback(ctx, f.db, b)
 	if err != nil {
 		t.Fatalf("rollback B: %v", err)
 	}
-	f.record(Rollback, b, target.RevisionID, &target.ExecutionID)
+	f.succeed(Rollback, b, target.RevisionID, &target.ExecutionID)
 	d, rd := f.newMigration("D", false)
-	f.record(Apply, d, rd, nil)
+	f.succeed(Apply, d, rd, nil)
 	if _, err := CheckForward(ctx, f.db, b); !errors.Is(err, ErrNotNextForward) {
 		t.Fatalf("forward B setelah D diterapkan: err = %v, want ErrNotNextForward", err)
 	}
 
 	irr, rirr := f.newMigration("irreversible", true)
-	f.record(Apply, irr, rirr, nil)
+	f.succeed(Apply, irr, rirr, nil)
 	if _, err := CheckRollback(ctx, f.db, irr); !errors.Is(err, ErrIrreversible) {
 		t.Fatalf("rollback irreversible: err = %v, want ErrIrreversible", err)
 	}
@@ -315,12 +346,84 @@ func TestRules(t *testing.T) {
 	}
 }
 
-func TestHistoryCannotBeUpdated(t *testing.T) {
+func TestFailedAttemptsAreRecorded(t *testing.T) {
 	f := newFixture(t)
+	ctx := context.Background()
 	a, ra := f.newMigration("A", false)
-	f.record(Apply, a, ra, nil)
-	if _, err := f.db.Exec(context.Background(), `UPDATE migration_history SET mode = 'batch'`); err == nil {
+
+	e1 := f.newExecutionID()
+	if err := f.attempt(e1, 1, Failed, Apply, a, ra, nil); err != nil {
+		t.Fatalf("apply gagal: %v", err)
+	}
+	if _, err := CheckRollback(ctx, f.db, a); !errors.Is(err, ErrNotApplied) {
+		t.Fatalf("rollback setelah apply gagal: err = %v, want ErrNotApplied", err)
+	}
+	if err := f.attempt(e1, 2, Succeeded, Apply, a, ra, nil); err != nil {
+		t.Fatalf("retry apply: %v", err)
+	}
+	target, err := CheckRollback(ctx, f.db, a)
+	if err != nil {
+		t.Fatalf("rollback A: %v", err)
+	}
+	if target.ExecutionID != e1 {
+		t.Fatalf("target rollback = %s, want %s", target.ExecutionID, e1)
+	}
+
+	e2 := f.newExecutionID()
+	if err := f.attempt(e2, 1, Failed, Rollback, a, target.RevisionID, &target.ExecutionID); err != nil {
+		t.Fatalf("rollback gagal: %v", err)
+	}
+	still, err := CheckRollback(ctx, f.db, a)
+	if err != nil || still.ExecutionID != e1 {
+		t.Fatalf("setelah rollback gagal: target = %s, err = %v, want %s", still.ExecutionID, err, e1)
+	}
+	if err := f.attempt(e2, 2, Succeeded, Rollback, a, target.RevisionID, &target.ExecutionID); err != nil {
+		t.Fatalf("retry rollback: %v", err)
+	}
+	if _, err := CheckRollback(ctx, f.db, a); !errors.Is(err, ErrNotApplied) {
+		t.Fatalf("rollback kedua: err = %v, want ErrNotApplied", err)
+	}
+
+	assertIDs(t, f.history(false), []string{e1 + "#1:failed", e1 + "#2:success", e2 + "#1:failed", e2 + "#2:success"})
+	assertIDs(t, f.history(true), []string{e1 + "#1:failed", e2 + "#1:failed"})
+
+	var version *int
+	var sqlstate, message *string
+	if err := f.db.QueryRow(ctx, `
+		SELECT version, sqlstate, error_message FROM migration_history WHERE execution_id = $1 AND attempt = 1`, e1,
+	).Scan(&version, &sqlstate, &message); err != nil {
+		t.Fatalf("baca attempt gagal: %v", err)
+	}
+	if version != nil || sqlstate == nil || *sqlstate != "08006" || message == nil || *message != "connection reset" {
+		t.Fatalf("attempt gagal = version %v, sqlstate %v, pesan %v", version, sqlstate, message)
+	}
+
+	if err := f.attempt(e1, 3, Succeeded, Apply, a, ra, nil); err == nil {
+		t.Fatal("attempt sukses kedua untuk execution yang sama seharusnya ditolak")
+	}
+}
+
+func TestHistoryIsImmutable(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	a, ra := f.newMigration("A", false)
+	f.succeed(Apply, a, ra, nil)
+
+	if _, err := f.db.Exec(ctx, `UPDATE migration_history SET mode = 'batch'`); err == nil {
 		t.Fatal("update migration_history seharusnya ditolak")
+	}
+	if _, err := f.db.Exec(ctx, `DELETE FROM migration_history`); err == nil {
+		t.Fatal("delete migration_history seharusnya ditolak")
+	}
+	if _, err := f.db.Exec(ctx, `DELETE FROM db_connections WHERE id = $1`, f.dbID); err != nil {
+		t.Fatalf("hapus koneksi database: %v", err)
+	}
+	var count int
+	if err := f.db.QueryRow(ctx, `SELECT count(*) FROM migration_history`).Scan(&count); err != nil {
+		t.Fatalf("hitung history: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("history tersisa %d baris setelah cascade, want 0", count)
 	}
 }
 
@@ -328,7 +431,7 @@ func TestRollbackEndpoint(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	a, ra := f.newMigration("A", false)
-	e1 := f.record(Apply, a, ra, nil)
+	e1 := f.succeed(Apply, a, ra, nil)
 	path := fmt.Sprintf("/api/migrations/%d/rollback", a)
 
 	if rec := f.call(denyAll{}, http.MethodPost, path); rec.Code != http.StatusForbidden {
