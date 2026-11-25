@@ -5,6 +5,7 @@ import Layout from './components/Layout'
 import AdminPage from './features/admin/AdminPage'
 import LoginPage from './features/auth/LoginPage'
 import DatabasesPage from './features/databases/DatabasesPage'
+import JobPage from './features/jobs/JobPage'
 import { useAuth } from './lib/auth'
 
 function AdminRoute() {
@@ -26,6 +27,8 @@ export const router = createBrowserRouter([
                         children: [{ path: '/admin', element: <AdminRoute /> }],
                     },
                     { path: '*', element: <NotFoundPage /> },
+                    { path: '/', element: <DatabasesPage /> },
+                    { path: '/jobs/:id', element: <JobPage /> },
                 ],
             },
         ],

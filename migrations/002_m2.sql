@@ -26,6 +26,8 @@ CREATE TABLE migration_revisions (
 );
 
 ALTER TABLE migrations
+    ALTER COLUMN sql DROP NOT NULL,
+    ALTER COLUMN status DROP NOT NULL,
     ADD COLUMN is_applied BOOLEAN NOT NULL DEFAULT FALSE,
     ADD COLUMN current_revision_id BIGINT REFERENCES migration_revisions(id);
 

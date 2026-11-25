@@ -8,6 +8,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type queryStartKey struct{}
@@ -16,6 +19,7 @@ type queryStart struct {
 	sql    string
 	params []any
 	at     time.Time
+	span   trace.Span
 }
 
 type pgxTracer struct{}
@@ -25,32 +29,53 @@ func PgxTracer() pgx.QueryTracer {
 }
 
 func (pgxTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
-	start := queryStart{sql: Redact(data.SQL), params: safeParams(data.Args), at: time.Now()}
-	if sqlEvent(data.SQL) == "sql.result" {
+	event := sqlEvent(data.SQL)
+	sql := Redact(data.SQL)
+	ctx, span := Tracer().Start(ctx, spanName(event),
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("db.system", "postgresql"),
+			attribute.String("db.statement", sql),
+		),
+	)
+	start := queryStart{sql: sql, params: safeParams(data.Args), at: time.Now(), span: span}
+	if event == "sql.result" {
 		Logger(ctx).Info("sql.start", "query", start.sql, "params", start.params)
 	}
 	return context.WithValue(ctx, queryStartKey{}, start)
 }
 
 func (pgxTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
-	start, _ := ctx.Value(queryStartKey{}).(queryStart)
+	start, ok := ctx.Value(queryStartKey{}).(queryStart)
+	if !ok {
+		return
+	}
+	rows := data.CommandTag.RowsAffected()
 	attrs := []any{
 		"query", start.sql,
 		"params", start.params,
 		"duration_ms", ms(time.Since(start.at)),
-		"rows", data.CommandTag.RowsAffected(),
+		"rows", rows,
 	}
+	start.span.SetAttributes(attribute.Int64("db.rows_affected", rows))
 	event := sqlEvent(start.sql)
+
 	if data.Err != nil {
+		msg := Redact(data.Err.Error())
 		var pgErr *pgconn.PgError
 		if errors.As(data.Err, &pgErr) {
 			attrs = append(attrs, "sqlstate", pgErr.Code)
+			start.span.SetAttributes(attribute.String("db.sqlstate", pgErr.Code))
 		}
-		attrs = append(attrs, "status", "error", "error", Redact(data.Err.Error()))
+		attrs = append(attrs, "status", "error", "error", msg)
 		Logger(ctx).Error(event, attrs...)
+		start.span.RecordError(errors.New(msg))
+		start.span.SetStatus(codes.Error, msg)
+		start.span.End()
 		return
 	}
 	Logger(ctx).Info(event, append(attrs, "status", "ok")...)
+	start.span.End()
 }
 
 func sqlEvent(sql string) string {
@@ -65,4 +90,11 @@ func sqlEvent(sql string) string {
 	default:
 		return "sql.result"
 	}
+}
+
+func spanName(event string) string {
+	if event == "sql.result" {
+		return "db.query"
+	}
+	return "db." + strings.TrimPrefix(event, "sql.")
 }
