@@ -49,5 +49,6 @@ export function statusStyle(status: JobStatus) {
 }
 
 export function isActive(status: JobStatus) {
-    return status === 'queued' || status === 'running'
+    // uncertain tetep dipantau, worker bakal ngecek ulang otomatis
+    return status === 'queued' || status === 'running' || status === 'uncertain'
 }
