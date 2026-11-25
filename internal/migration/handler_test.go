@@ -37,23 +37,34 @@ func (m testManager) Pool(context.Context, int64) (*pgxpool.Pool, error) { retur
 func (testManager) Test(context.Context, dbmanager.ConnConfig) error     { return nil }
 func (testManager) Invalidate(int64)                                     {}
 
+func strPtr(s string) *string { return &s }
+func intPtr(i int) *int       { return &i }
+
 func TestDecodeMigrationInput(t *testing.T) {
-	request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"title":"  add column  ","sql":"ALTER TABLE items ADD COLUMN name TEXT;"}`))
+	request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{
+		"title":"  add column  ",
+		"sqlUp":"ALTER TABLE items ADD COLUMN name TEXT;",
+		"sqlDown":"ALTER TABLE items DROP COLUMN name;"
+	}`))
 	response := httptest.NewRecorder()
 	input, ok := decodeMigrationInput(response, request)
 	if !ok {
 		t.Fatalf("valid input rejected: %s", response.Body.String())
 	}
-	if input.Title != "add column" || input.SQL != "ALTER TABLE items ADD COLUMN name TEXT;" {
+	if input.Title != "add column" || input.Mode != "normal" || input.SQLUp != "ALTER TABLE items ADD COLUMN name TEXT;" {
 		t.Fatalf("unexpected normalized input: %#v", input)
 	}
 
 	for _, body := range []string{
-		`{"title":"","sql":"SELECT 1"}`,
-		`{"title":"valid","sql":"  "}`,
-		`{"title":"valid","sql":"SELECT 1","unexpected":true}`,
-		`{"title":"valid","sql":"SELECT 1"} {}`,
-		`{"title":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sql":"SELECT 1"}`,
+		`{"title":"","sqlUp":"SELECT 1"}`,
+		`{"title":"valid","sqlUp":"  "}`,
+		`{"title":"valid","sqlUp":"SELECT 1","unexpected":true}`,
+		`{"title":"valid","sqlUp":"SELECT 1"} {}`,
+		`{"title":"valid","sqlUp":"SELECT 1","mode":"invalid"}`,
+		`{"title":"valid","sqlUp":"SELECT 1","mode":"batch"}`,
+		`{"title":"valid","sqlUp":"SELECT 1","mode":"batch","batchTable":"t","batchColumn":"id","batchSize":0}`,
+		`{"title":"valid","sqlUp":"SELECT 1","mode":"batch","batchTable":"t","batchColumn":"id","batchSize":100001}`,
+		`{"title":"` + strings.Repeat("a", 201) + `","sqlUp":"SELECT 1"}`,
 	} {
 		t.Run(body, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
@@ -63,6 +74,146 @@ func TestDecodeMigrationInput(t *testing.T) {
 			}
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400", rec.Code)
+			}
+		})
+	}
+}
+
+func TestValidateStructureUnit(t *testing.T) {
+	cases := []struct {
+		name      string
+		spec      RevisionSpec
+		wantValid bool
+	}{
+		{
+			name: "valid normal with sqlDown",
+			spec: RevisionSpec{
+				Mode:    "normal",
+				SQLUp:   "CREATE TABLE a (id INT);",
+				SQLDown: strPtr("DROP TABLE a;"),
+			},
+			wantValid: true,
+		},
+		{
+			name: "valid irreversible with reason",
+			spec: RevisionSpec{
+				Mode:               "normal",
+				SQLUp:              "DELETE FROM logs;",
+				Irreversible:       true,
+				IrreversibleReason: strPtr("Data tidak dapat dipulihkan"),
+			},
+			wantValid: true,
+		},
+		{
+			name: "missing sqlDown when reversible",
+			spec: RevisionSpec{
+				Mode:    "normal",
+				SQLUp:   "CREATE TABLE a (id INT);",
+				SQLDown: strPtr("   "),
+			},
+			wantValid: false,
+		},
+		{
+			name: "missing reason when irreversible",
+			spec: RevisionSpec{
+				Mode:               "normal",
+				SQLUp:              "DELETE FROM logs;",
+				Irreversible:       true,
+				IrreversibleReason: strPtr(" "),
+			},
+			wantValid: false,
+		},
+		{
+			name: "batch missing placeholders in sqlUp",
+			spec: RevisionSpec{
+				Mode:        "batch",
+				SQLUp:       "UPDATE orders SET x = 1;",
+				SQLDown:     strPtr("UPDATE orders SET x = 0 WHERE id > {{lo}} AND id <= {{hi}};"),
+				BatchTable:  strPtr("orders"),
+				BatchColumn: strPtr("id"),
+				BatchSize:   intPtr(1000),
+			},
+			wantValid: false,
+		},
+		{
+			name: "batch missing placeholders in sqlDown",
+			spec: RevisionSpec{
+				Mode:        "batch",
+				SQLUp:       "UPDATE orders SET x = 1 WHERE id > {{lo}} AND id <= {{hi}};",
+				SQLDown:     strPtr("UPDATE orders SET x = 0;"),
+				BatchTable:  strPtr("orders"),
+				BatchColumn: strPtr("id"),
+				BatchSize:   intPtr(1000),
+			},
+			wantValid: false,
+		},
+		{
+			name: "valid batch",
+			spec: RevisionSpec{
+				Mode:        "batch",
+				SQLUp:       "UPDATE orders SET x = 1 WHERE id > {{lo}} AND id <= {{hi}};",
+				SQLDown:     strPtr("UPDATE orders SET x = 0 WHERE id > {{lo}} AND id <= {{hi}};"),
+				BatchTable:  strPtr("orders"),
+				BatchColumn: strPtr("id"),
+				BatchSize:   intPtr(1000),
+			},
+			wantValid: true,
+		},
+		{
+			name: "reject COMMIT in sqlUp",
+			spec: RevisionSpec{
+				Mode:    "normal",
+				SQLUp:   "CREATE TABLE a (id INT); COMMIT;",
+				SQLDown: strPtr("DROP TABLE a;"),
+			},
+			wantValid: false,
+		},
+		{
+			name: "reject BEGIN and START TRANSACTION",
+			spec: RevisionSpec{
+				Mode:    "normal",
+				SQLUp:   "START TRANSACTION; CREATE TABLE a (id INT);",
+				SQLDown: strPtr("DROP TABLE a;"),
+			},
+			wantValid: false,
+		},
+		{
+			name: "reject SAVEPOINT in sqlDown",
+			spec: RevisionSpec{
+				Mode:    "normal",
+				SQLUp:   "CREATE TABLE a (id INT);",
+				SQLDown: strPtr("SAVEPOINT sp1; DROP TABLE a;"),
+			},
+			wantValid: false,
+		},
+		{
+			name: "allow BEGIN END inside dollar-quoted function",
+			spec: RevisionSpec{
+				Mode:    "normal",
+				SQLUp:   "CREATE FUNCTION f() RETURNS void AS $$ BEGIN PERFORM 1; END; $$ LANGUAGE plpgsql;",
+				SQLDown: strPtr("DROP FUNCTION f();"),
+			},
+			wantValid: true,
+		},
+		{
+			name: "reject multi-statement in batch mode",
+			spec: RevisionSpec{
+				Mode:        "batch",
+				SQLUp:       "UPDATE orders SET x = 1 WHERE id > {{lo}} AND id <= {{hi}}; SELECT 1;",
+				SQLDown:     strPtr("UPDATE orders SET x = 0 WHERE id > {{lo}} AND id <= {{hi}};"),
+				BatchTable:  strPtr("orders"),
+				BatchColumn: strPtr("id"),
+				BatchSize:   intPtr(1000),
+			},
+			wantValid: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := ValidateStructure(tc.spec)
+			if res.Valid != tc.wantValid {
+				t.Fatalf("Valid = %v, want %v; errors = %v", res.Valid, tc.wantValid, res.Errors)
 			}
 		})
 	}
@@ -99,86 +250,196 @@ func TestMigrationIntegration(t *testing.T) {
 	handler := NewHandler(platform, testManager{pool: target}, testAuthorizer{})
 	mux := http.NewServeMux()
 	handler.Register(mux)
-	assertExecute := func(t *testing.T, sql string) (Migration, int) {
-		t.Helper()
-		var migrationID int64
-		if err := platform.QueryRow(ctx, `
-			INSERT INTO migrations (db_connection_id, title, sql, status, created_by)
-			VALUES ($1, 'integration test', $2, 'draft', $3) RETURNING id`, dbID, sql, userID).Scan(&migrationID); err != nil {
-			t.Fatalf("create migration fixture: %v", err)
-		}
-		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/migrations/%d/execute", migrationID), nil)
-		req = req.WithContext(auth.WithUser(req.Context(), &auth.User{ID: userID, Username: username}))
-		response := httptest.NewRecorder()
-		mux.ServeHTTP(response, req)
-		var item Migration
-		if err := json.Unmarshal(response.Body.Bytes(), &item); err != nil {
-			t.Fatalf("decode execution response (HTTP %d): %v; body=%s", response.Code, err, response.Body.String())
-		}
-		return item, response.Code
+
+	asUser := func(req *http.Request) *http.Request {
+		return req.WithContext(auth.WithUser(req.Context(), &auth.User{ID: userID, Username: username}))
 	}
 
-	t.Run("successful migration commits and receives next version", func(t *testing.T) {
-		tableName := fmt.Sprintf("migration_ok_%d", time.Now().UnixNano())
+	t.Run("create, validate dry run rollback, submit, and immutable revisions", func(t *testing.T) {
+		tableName := fmt.Sprintf("mig_dryrun_%d", time.Now().UnixNano())
 		t.Cleanup(func() { dropTargetTable(t, target, targetSchema, tableName) })
-		item, status := assertExecute(t, "CREATE TABLE "+tableName+" (id INTEGER)")
-		if status != http.StatusOK || item.Status != "success" || item.Version == nil || *item.Version != 1 {
-			t.Fatalf("unexpected success result: HTTP %d, migration %#v", status, item)
-		}
-		update := httptest.NewRequest(
-			http.MethodPatch,
-			fmt.Sprintf("/api/migrations/%d", item.ID),
-			strings.NewReader(`{"title":"changed","sql":"SELECT 1"}`),
-		)
-		update = update.WithContext(auth.WithUser(update.Context(), &auth.User{ID: userID, Username: username}))
-		updateResponse := httptest.NewRecorder()
-		mux.ServeHTTP(updateResponse, update)
-		if updateResponse.Code != http.StatusBadRequest {
-			t.Fatalf("update status = %d, want %d; body=%s", updateResponse.Code, http.StatusBadRequest, updateResponse.Body.String())
-		}
-		if !tableExists(t, tableName) {
-			t.Fatalf("migration DDL not committed: %s.%s does not exist", targetSchema, tableName)
-		}
-	})
 
-	t.Run("failed migration rolls back and records failure", func(t *testing.T) {
-		tableName := fmt.Sprintf("migration_rollback_%d", time.Now().UnixNano())
-		t.Cleanup(func() { dropTargetTable(t, target, targetSchema, tableName) })
-		item, status := assertExecute(t, "CREATE TABLE "+tableName+" (id INTEGER); SELECT 1 / 0")
-		if status != http.StatusOK || item.Status != "failed" || item.Version != nil || item.ErrorMessage == nil {
-			t.Fatalf("unexpected failure result: HTTP %d, migration %#v", status, item)
+		// 1. Create draft tanpa sqlDown -> boleh disimpan sebagai draft.
+		createBody := fmt.Sprintf(`{"title":"create %s","sqlUp":"CREATE TABLE %s (id INT);"}`, tableName, tableName)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, asUser(httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/databases/%d/migrations", dbID), strings.NewReader(createBody))))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+		}
+		var detail MigrationDetail
+		if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+			t.Fatalf("decode create: %v", err)
+		}
+		if detail.CurrentRevision == nil || detail.CurrentRevision.RevisionNo != 1 || detail.CurrentRevision.Status != "draft" {
+			t.Fatalf("unexpected initial revision: %#v", detail.CurrentRevision)
+		}
+
+		// 2. Validate gagal karena belum ada sqlDown dan tidak irreversible.
+		rec = httptest.NewRecorder()
+		mux.ServeHTTP(rec, asUser(httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/migrations/%d/validate", detail.ID), nil)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("validate status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		var valRes ValidationResult
+		if err := json.Unmarshal(rec.Body.Bytes(), &valRes); err != nil {
+			t.Fatalf("decode validate: %v", err)
+		}
+		if valRes.Valid || len(valRes.Errors) == 0 {
+			t.Fatalf("expected structure validation failure, got %#v", valRes)
+		}
+
+		// 3. Submit juga ditolak karena validasi gagal.
+		rec = httptest.NewRecorder()
+		mux.ServeHTTP(rec, asUser(httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/migrations/%d/submit", detail.ID), nil)))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("submit invalid status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+		}
+
+		// 4. Update draft dengan SQL invalid -> dry run menangkap error SQL.
+		badPatch := fmt.Sprintf(`{"title":"create %s","sqlUp":"CREATE TABLE %s (id INT); SELECT 1 / 0;","sqlDown":"DROP TABLE %s;"}`, tableName, tableName, tableName)
+		rec = httptest.NewRecorder()
+		mux.ServeHTTP(rec, asUser(httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/migrations/%d", detail.ID), strings.NewReader(badPatch))))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("patch bad sql status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		rec = httptest.NewRecorder()
+		mux.ServeHTTP(rec, asUser(httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/migrations/%d/validate", detail.ID), nil)))
+		if err := json.Unmarshal(rec.Body.Bytes(), &valRes); err != nil {
+			t.Fatalf("decode dry run error: %v", err)
+		}
+		if valRes.Valid || len(valRes.Errors) == 0 {
+			t.Fatalf("expected dry run SQL error, got %#v", valRes)
 		}
 		if tableExists(t, tableName) {
-			t.Fatalf("failed migration left DDL committed: %s.%s exists", targetSchema, tableName)
+			t.Fatalf("dry run committed table %s on error", tableName)
+		}
+
+		// 5. Update draft dengan SQL valid -> validate lulus & tetap di-rollback.
+		goodPatch := fmt.Sprintf(`{"title":"create %s","sqlUp":"CREATE TABLE %s (id INT);","sqlDown":"DROP TABLE %s;"}`, tableName, tableName, tableName)
+		rec = httptest.NewRecorder()
+		mux.ServeHTTP(rec, asUser(httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/migrations/%d", detail.ID), strings.NewReader(goodPatch))))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("patch good sql status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		rec = httptest.NewRecorder()
+		mux.ServeHTTP(rec, asUser(httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/migrations/%d/validate", detail.ID), nil)))
+		if err := json.Unmarshal(rec.Body.Bytes(), &valRes); err != nil {
+			t.Fatalf("decode dry run ok: %v", err)
+		}
+		if !valRes.Valid || len(valRes.Errors) != 0 {
+			t.Fatalf("expected valid dry run, got %#v", valRes)
+		}
+		if tableExists(t, tableName) {
+			t.Fatalf("dry run should have rolled back %s", tableName)
+		}
+
+		// 6. Submit -> revisi 1 dibekukan, change request dibuat.
+		rec = httptest.NewRecorder()
+		mux.ServeHTTP(rec, asUser(httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/migrations/%d/submit", detail.ID), nil)))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("submit status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+		}
+		var submitResp struct {
+			ChangeRequestID int64           `json:"changeRequestId"`
+			Migration       MigrationDetail `json:"migration"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &submitResp); err != nil {
+			t.Fatalf("decode submit: %v", err)
+		}
+		if submitResp.ChangeRequestID <= 0 || submitResp.Migration.CurrentRevision.Status != "submitted" {
+			t.Fatalf("unexpected submit response: %#v", submitResp)
+		}
+		if len(submitResp.Migration.ChangeRequests) != 1 || submitResp.Migration.ChangeRequests[0].Status != "pending_review" {
+			t.Fatalf("unexpected change requests: %#v", submitResp.Migration.ChangeRequests)
+		}
+
+		// 7. PATCH setelah submitted (belum pernah dieksekusi) -> buat revisi 2, revisi 1 tetap immutable.
+		rev2Patch := fmt.Sprintf(`{"title":"create %s v2","sqlUp":"CREATE TABLE %s (id INT, name TEXT);","sqlDown":"DROP TABLE %s;"}`, tableName, tableName, tableName)
+		rec = httptest.NewRecorder()
+		mux.ServeHTTP(rec, asUser(httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/migrations/%d", detail.ID), strings.NewReader(rev2Patch))))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("patch rev2 status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+			t.Fatalf("decode rev2: %v", err)
+		}
+		if len(detail.Revisions) != 2 || detail.Revisions[0].Status != "submitted" || detail.Revisions[1].RevisionNo != 2 || detail.Revisions[1].Status != "draft" {
+			t.Fatalf("unexpected revisions after patch: %#v", detail.Revisions)
+		}
+
+		// 8. Jika migration sudah pernah dieksekusi (version terisi), PATCH ditolak.
+		if _, err := platform.Exec(ctx, `UPDATE migration_revisions SET status = 'submitted' WHERE id = $1`, detail.CurrentRevision.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := platform.Exec(ctx, `UPDATE migrations SET version = 1, is_applied = TRUE WHERE id = $1`, detail.ID); err != nil {
+			t.Fatal(err)
+		}
+		rec = httptest.NewRecorder()
+		mux.ServeHTTP(rec, asUser(httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/migrations/%d", detail.ID), strings.NewReader(rev2Patch))))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("patch executed migration status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 		}
 	})
 
-	t.Run("view-only user cannot create or execute migrations", func(t *testing.T) {
+	t.Run("batch validation checks unique index on target", func(t *testing.T) {
+		tableName := fmt.Sprintf("mig_batch_%d", time.Now().UnixNano())
+		t.Cleanup(func() { dropTargetTable(t, target, targetSchema, tableName) })
+		if _, err := target.Exec(ctx, fmt.Sprintf(`CREATE TABLE %s (id BIGINT PRIMARY KEY, val INT)`, pgx.Identifier{targetSchema, tableName}.Sanitize())); err != nil {
+			t.Fatalf("create batch table: %v", err)
+		}
+
+		// Kolom id (PRIMARY KEY = unique index) -> valid.
+		okRes, err := ValidateRevision(ctx, target, RevisionSpec{
+			Mode:        "batch",
+			SQLUp:       fmt.Sprintf("UPDATE %s SET val = val + 1 WHERE id > {{lo}} AND id <= {{hi}};", tableName),
+			SQLDown:     strPtr(fmt.Sprintf("UPDATE %s SET val = val - 1 WHERE id > {{lo}} AND id <= {{hi}};", tableName)),
+			BatchTable:  strPtr(tableName),
+			BatchColumn: strPtr("id"),
+			BatchSize:   intPtr(500),
+		})
+		if err != nil || !okRes.Valid {
+			t.Fatalf("expected valid batch on primary key, got err=%v res=%#v", err, okRes)
+		}
+
+		// Kolom val (tanpa unique index) -> ditolak.
+		badRes, err := ValidateRevision(ctx, target, RevisionSpec{
+			Mode:        "batch",
+			SQLUp:       fmt.Sprintf("UPDATE %s SET val = val + 1 WHERE val > {{lo}} AND val <= {{hi}};", tableName),
+			SQLDown:     strPtr(fmt.Sprintf("UPDATE %s SET val = val - 1 WHERE val > {{lo}} AND val <= {{hi}};", tableName)),
+			BatchTable:  strPtr(tableName),
+			BatchColumn: strPtr("val"),
+			BatchSize:   intPtr(500),
+		})
+		if err != nil || badRes.Valid {
+			t.Fatalf("expected invalid batch on non-unique column, got err=%v res=%#v", err, badRes)
+		}
+	})
+
+	t.Run("view-only user cannot create, validate, or submit", func(t *testing.T) {
 		denied := NewHandler(platform, testManager{pool: target}, testAuthorizer{err: authz.ErrForbidden})
 		deniedMux := http.NewServeMux()
 		denied.Register(deniedMux)
-		userContext := func(req *http.Request) *http.Request {
-			return req.WithContext(auth.WithUser(req.Context(), &auth.User{ID: userID, Username: username}))
-		}
-		create := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/databases/%d/migrations", dbID), strings.NewReader(`{"title":"denied","sql":"SELECT 1"}`))
-		createResponse := httptest.NewRecorder()
-		deniedMux.ServeHTTP(createResponse, userContext(create))
-		if createResponse.Code != http.StatusForbidden {
-			t.Fatalf("create status = %d, want 403; body=%s", createResponse.Code, createResponse.Body.String())
+
+		rec := httptest.NewRecorder()
+		deniedMux.ServeHTTP(rec, asUser(httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/databases/%d/migrations", dbID), strings.NewReader(`{"title":"denied","sqlUp":"SELECT 1"}`))))
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("create status = %d, want 403; body=%s", rec.Code, rec.Body.String())
 		}
 
-		var migrationID int64
-		if err := platform.QueryRow(ctx, `
-			INSERT INTO migrations (db_connection_id, title, sql, status, created_by)
-			VALUES ($1, 'denied execute', 'SELECT 1', 'draft', $2) RETURNING id`, dbID, userID).Scan(&migrationID); err != nil {
-			t.Fatalf("create migration fixture: %v", err)
+		// Buat fixture migration lalu coba validate & submit sebagai view-only user.
+		createRec := httptest.NewRecorder()
+		mux.ServeHTTP(createRec, asUser(httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/databases/%d/migrations", dbID), strings.NewReader(`{"title":"fixture","sqlUp":"SELECT 1","sqlDown":"SELECT 1"}`))))
+		var created MigrationDetail
+		if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+			t.Fatalf("decode fixture: %v", err)
 		}
-		execute := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/migrations/%d/execute", migrationID), nil)
-		executeResponse := httptest.NewRecorder()
-		deniedMux.ServeHTTP(executeResponse, userContext(execute))
-		if executeResponse.Code != http.StatusForbidden {
-			t.Fatalf("execute status = %d, want 403; body=%s", executeResponse.Code, executeResponse.Body.String())
+
+		for _, suffix := range []string{"validate", "submit"} {
+			r := httptest.NewRecorder()
+			deniedMux.ServeHTTP(r, asUser(httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/migrations/%d/%s", created.ID, suffix), nil)))
+			if r.Code != http.StatusForbidden {
+				t.Fatalf("%s status = %d, want 403; body=%s", suffix, r.Code, r.Body.String())
+			}
 		}
 	})
-
 }

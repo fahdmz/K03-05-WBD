@@ -73,12 +73,17 @@ func setupPlatformDB(t *testing.T, databaseURL string) *pgxpool.Pool {
 	pool := connectOrSkip(t, cfg)
 	t.Cleanup(pool.Close)
 
-	schema, err := os.ReadFile("../../migrations/001_init.sql")
-	if err != nil {
-		t.Fatalf("baca schema: %v", err)
-	}
-	if _, err := pool.Exec(ctx, string(schema)); err != nil {
-		t.Fatalf("buat tabel: %v", err)
+	for _, file := range []string{
+		"../../migrations/001_init.sql",
+		"../../migrations/002_m2.sql",
+	} {
+		schema, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("baca schema %s: %v", file, err)
+		}
+		if _, err := pool.Exec(ctx, string(schema)); err != nil {
+			t.Fatalf("terapkan %s: %v", file, err)
+		}
 	}
 	return pool
 }

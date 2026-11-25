@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"unicode/utf8"
@@ -10,9 +11,10 @@ import (
 )
 
 type groupResponse struct {
-	ID          int64  `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
+	ID           int64  `json:"id"`
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	LeaderUserID *int64 `json:"leaderUserId"`
 }
 
 type groupDetailResponse struct {
@@ -21,9 +23,14 @@ type groupDetailResponse struct {
 	Access    []groupAccessEntry `json:"access"`
 }
 
+type optionalInt64 struct {
+	Set   bool
+	Value *int64
+}
+
 func scanGroup(row pgx.Row) (groupResponse, error) {
 	var group groupResponse
-	err := row.Scan(&group.ID, &group.Name, &group.Description)
+	err := row.Scan(&group.ID, &group.Name, &group.Description, &group.LeaderUserID)
 	return group, err
 }
 
@@ -34,6 +41,7 @@ func (h *ResourceHandler) ListGroups(w http.ResponseWriter, r *http.Request) {
 				g.id,
 				g.name,
 				g.description,
+				g.leader_user_id,
 				ARRAY(
 					SELECT gm.user_id
 					FROM group_members gm
@@ -69,6 +77,7 @@ func (h *ResourceHandler) ListGroups(w http.ResponseWriter, r *http.Request) {
 				&group.ID,
 				&group.Name,
 				&group.Description,
+				&group.LeaderUserID,
 				&group.MemberIDs,
 				&group.Access,
 			); err != nil {
@@ -105,7 +114,7 @@ func (h *ResourceHandler) CreateGroup(w http.ResponseWriter, r *http.Request) {
 		return scanGroup(tx.QueryRow(ctx, `
 			INSERT INTO groups (name, description)
 			VALUES ($1, $2)
-			RETURNING id, name, description
+			RETURNING id, name, description, leader_user_id
 		`, input.Name, input.Description))
 	}, nil)
 }
@@ -122,14 +131,15 @@ func (h *ResourceHandler) UpdateGroup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var input struct {
-		Name        *string `json:"name"`
-		Description *string `json:"description"`
+		Name         *string       `json:"name"`
+		Description  *string       `json:"description"`
+		LeaderUserID optionalInt64 `json:"leaderUserId"`
 	}
 	if !decodeUserBody(w, r, &input) {
 		return
 	}
 
-	if input.Name == nil && input.Description == nil {
+	if input.Name == nil && input.Description == nil && !input.LeaderUserID.Set {
 		resourceFailure(w, badInput("Kirim minimal satu field"))
 		return
 	}
@@ -150,14 +160,41 @@ func (h *ResourceHandler) UpdateGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if input.LeaderUserID.Set && input.LeaderUserID.Value != nil && *input.LeaderUserID.Value <= 0 {
+		resourceFailure(w, badInput("ID leader tidak valid"))
+		return
+	}
+
 	h.run(w, r, http.StatusOK, func(ctx context.Context, tx pgx.Tx) (any, error) {
+		if err := lockGroup(ctx, tx, id); err != nil {
+			return nil, err
+		}
+		if input.LeaderUserID.Set && input.LeaderUserID.Value != nil {
+			var isMember bool
+			if err := tx.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1
+					FROM group_members
+					WHERE group_id = $1 AND user_id = $2
+				)
+			`, id, *input.LeaderUserID.Value).Scan(&isMember); err != nil {
+				return nil, err
+			}
+			if !isMember {
+				return nil, badInput("Leader harus anggota group")
+			}
+		}
 		return scanGroup(tx.QueryRow(ctx, `
 			UPDATE groups
 			SET name = COALESCE($2::text, name),
-			    description = COALESCE($3::text, description)
+			    description = COALESCE($3::text, description),
+			    leader_user_id = CASE
+			        WHEN $4::boolean THEN $5::bigint
+			        ELSE leader_user_id
+			    END
 			WHERE id = $1
-			RETURNING id, name, description
-		`, id, input.Name, input.Description))
+			RETURNING id, name, description, leader_user_id
+		`, id, input.Name, input.Description, input.LeaderUserID.Set, input.LeaderUserID.Value))
 	}, nil)
 }
 
@@ -272,6 +309,16 @@ func (h *ResourceHandler) SetGroupMembers(
 			INSERT INTO group_members (group_id, user_id)
 			SELECT $1, user_id
 			FROM unnest($2::bigint[]) AS member(user_id)
+		`, id, *input.UserIDs); err != nil {
+			return nil, err
+		}
+
+		if _, err := tx.Exec(ctx, `
+			UPDATE groups
+			SET leader_user_id = NULL
+			WHERE id = $1
+			AND leader_user_id IS NOT NULL
+			AND NOT (leader_user_id = ANY($2::bigint[]))
 		`, id, *input.UserIDs); err != nil {
 			return nil, err
 		}
@@ -435,4 +482,18 @@ func (h *ResourceHandler) SetGroupAccess(
 
 		return result, nil
 	}, nil)
+}
+
+func (o *optionalInt64) UnmarshalJSON(data []byte) error {
+	o.Set = true
+	if string(data) == "null" {
+		o.Value = nil
+		return nil
+	}
+	var v int64
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	o.Value = &v
+	return nil
 }
