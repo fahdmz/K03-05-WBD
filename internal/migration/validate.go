@@ -13,14 +13,14 @@ import (
 )
 
 const (
-	maxBatchSize = 100000
-	dryRunTimeout = 12 * time.Second
+	maxBatchSize      = 100000
+	dryRunTimeout     = 12 * time.Second
 	rollbackGraceTime = 2 * time.Second
 )
 
 type ValidationResult struct {
-	Valid bool `jason:"valid"`
-	Errors []string `json:"errors"`
+	Valid    bool     `jason:"valid"`
+	Errors   []string `json:"errors"`
 	Warnings []string `json:"warnings"`
 }
 
@@ -37,7 +37,7 @@ type RevisionSpec struct {
 
 func ValidateStructure(spec RevisionSpec) ValidationResult {
 	res := ValidationResult{
-		Errors: make([]string, 0),
+		Errors:   make([]string, 0),
 		Warnings: make([]string, 0),
 	}
 	if strings.TrimSpace(spec.SQLUp) == "" {
@@ -171,7 +171,8 @@ func splitSQLStatements(sql string) []string {
 		}
 
 		// Dollar-quoted literal: $$...$$ atau $tag$...$tag$
-		if c == '$' {
+		// Tidak boleh diawali karakter identifier Postgres (huruf, angka, _, $, non-ASCII).
+		if c == '$' && (i == 0 || !isSQLIdentChar(sql[i-1])) {
 			if tag, ok := matchDollarTag(sql[i:]); ok {
 				cur.WriteString(tag)
 				i += len(tag)
@@ -205,6 +206,15 @@ func splitSQLStatements(sql string) []string {
 	return stmts
 }
 
+func isSQLIdentChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') ||
+		(b >= 'A' && b <= 'Z') ||
+		(b >= '0' && b <= '9') ||
+		b == '_' ||
+		b == '$' ||
+		b >= 0x80
+}
+
 func matchDollarTag(s string) (string, bool) {
 	if len(s) < 2 || s[0] != '$' {
 		return "", false
@@ -236,7 +246,7 @@ func ValidateRevision(ctx context.Context, targetPool *pgxpool.Pool, spec Revisi
 			return ValidationResult{}, err
 		}
 		res.Valid = len(res.Errors) == 0
-		return res,nil
+		return res, nil
 	}
 	if err := runDryRun(ctx, targetPool, spec, &res); err != nil {
 		return ValidationResult{}, err
@@ -332,6 +342,7 @@ func runDryRun(
 		_ = tx.Rollback(cleanupCtx)
 	}()
 	for _, setting := range []string{
+		"SET LOCAL standard_conforming_strings = on",
 		"SET LOCAL statement_timeout = '5s'",
 		"SET LOCAL lock_timeout = '2s'",
 	} {
@@ -343,9 +354,17 @@ func runDryRun(
 		classifyDryRunError("SQL up", runCtx, err, res)
 		return nil
 	}
+	if tx.Conn().PgConn().TxStatus() != 'T' {
+		res.Errors = append(res.Errors, "Dry run SQL up menutup transaksi secara tidak sah")
+		return nil
+	}
 	if !spec.Irreversible && spec.SQLDown != nil {
 		if _, err := tx.Exec(runCtx, *spec.SQLDown, pgx.QueryExecModeSimpleProtocol); err != nil {
 			classifyDryRunError("SQL down", runCtx, err, res)
+			return nil
+		}
+		if tx.Conn().PgConn().TxStatus() != 'T' {
+			res.Errors = append(res.Errors, "Dry run SQL down menutup transaksi secara tidak sah")
 			return nil
 		}
 	}

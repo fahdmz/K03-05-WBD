@@ -395,4 +395,102 @@ func TestWorkflowIntegration(t *testing.T) {
 			t.Fatalf("run rejected CR status = %d, want 400", rec.Code)
 		}
 	})
+
+	t.Run("multi-step resume chain passes Revalidate", func(t *testing.T) {
+		migID, revID, crP := createSubmittedCR(t, "mig-chain")
+
+		// Approve & jalankan P -> simulasi berhenti partial.
+		reqAs(10, http.MethodPost, fmt.Sprintf("/api/change-requests/%d/approve", crP), `{}`)
+		reqAs(20, http.MethodPost, fmt.Sprintf("/api/change-requests/%d/approve", crP), `{}`)
+		runP := reqAs(10, http.MethodPost, fmt.Sprintf("/api/change-requests/%d/run", crP), ``)
+		if runP.Code != http.StatusAccepted {
+			t.Fatalf("run P status = %d, want 202; body=%s", runP.Code, runP.Body.String())
+		}
+		var respP struct {
+			ExecutionID string `json:"executionId"`
+		}
+		if err := json.Unmarshal(runP.Body.Bytes(), &respP); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE jobs SET status = 'partial' WHERE change_request_id = $1`, crP); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE change_requests SET status = 'partial' WHERE id = $1`, crP); err != nil {
+			t.Fatal(err)
+		}
+
+		// Buat resume R1 dari P -> approve & jalankan -> berhenti partial lagi.
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		crR1, err := CreateRequest(ctx, tx, RequestInput{
+			DatabaseID:        10,
+			MigrationID:       migID,
+			RevisionID:        revID,
+			Action:            "resume",
+			TargetExecutionID: &respP.ExecutionID,
+			RequestedBy:       10,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		reqAs(10, http.MethodPost, fmt.Sprintf("/api/change-requests/%d/approve", crR1), `{}`)
+		reqAs(20, http.MethodPost, fmt.Sprintf("/api/change-requests/%d/approve", crR1), `{}`)
+		runR1 := reqAs(10, http.MethodPost, fmt.Sprintf("/api/change-requests/%d/run", crR1), ``)
+		if runR1.Code != http.StatusAccepted {
+			t.Fatalf("run R1 status = %d, want 202; body=%s", runR1.Code, runR1.Body.String())
+		}
+		var respR1 struct {
+			ExecutionID string `json:"executionId"`
+		}
+		if err := json.Unmarshal(runR1.Body.Bytes(), &respR1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE jobs SET status = 'partial' WHERE change_request_id = $1`, crR1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE change_requests SET status = 'partial' WHERE id = $1`, crR1); err != nil {
+			t.Fatal(err)
+		}
+
+		// Buat resume R2 dari R1 -> approve & jalankan -> Revalidate harus LOLOS walau P dan R1 masih partial.
+		tx, err = pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		crR2, err := CreateRequest(ctx, tx, RequestInput{
+			DatabaseID:        10,
+			MigrationID:       migID,
+			RevisionID:        revID,
+			Action:            "resume",
+			TargetExecutionID: &respR1.ExecutionID,
+			RequestedBy:       10,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		reqAs(10, http.MethodPost, fmt.Sprintf("/api/change-requests/%d/approve", crR2), `{}`)
+		reqAs(20, http.MethodPost, fmt.Sprintf("/api/change-requests/%d/approve", crR2), `{}`)
+		runR2 := reqAs(10, http.MethodPost, fmt.Sprintf("/api/change-requests/%d/run", crR2), ``)
+		if runR2.Code != http.StatusAccepted {
+			t.Fatalf("run R2 status = %d, want 202; body=%s", runR2.Code, runR2.Body.String())
+		}
+
+		tx, err = pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := Revalidate(ctx, tx, crR2); err != nil {
+			tx.Rollback(ctx)
+			t.Fatalf("expected Revalidate on 2nd resume in chain to succeed, got: %v", err)
+		}
+		tx.Rollback(ctx)
+	})
 }

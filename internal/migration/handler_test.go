@@ -196,6 +196,15 @@ func TestValidateStructureUnit(t *testing.T) {
 			wantValid: true,
 		},
 		{
+			name: "reject dollar-identifier bypass with COMMIT",
+			spec: RevisionSpec{
+				Mode:    "normal",
+				SQLUp:   "SELECT 1 AS a$$x$; COMMIT; DROP TABLE t; SELECT $x$",
+				SQLDown: strPtr("SELECT 1;"),
+			},
+			wantValid: false,
+		},
+		{
 			name: "reject multi-statement in batch mode",
 			spec: RevisionSpec{
 				Mode:        "batch",

@@ -15,7 +15,7 @@ import (
 var (
 	ErrNotImplemented = errors.New("workflow: belum diimplementasikan")
 	ErrNotFound       = errors.New("change request tidak ditemukan")
-) 
+)
 
 type RequestInput struct {
 	DatabaseID        int64
@@ -236,13 +236,38 @@ func Revalidate(ctx context.Context, tx pgx.Tx, changeRequestID int64) error {
 	var hasBlockingJob bool
 	if (action == "resume" || action == "revert") && targetExec.Valid {
 		err = tx.QueryRow(ctx, `
+			WITH RECURSIVE up AS (
+				SELECT j.execution_id, cr.action, cr.target_execution_id, 0 AS depth
+				FROM jobs j
+				JOIN change_requests cr ON cr.id = j.change_request_id
+				WHERE j.execution_id = $3::uuid
+				UNION ALL
+				SELECT j.execution_id, cr.action, cr.target_execution_id, up.depth + 1
+				FROM up
+				JOIN jobs j ON j.execution_id = up.target_execution_id
+				JOIN change_requests cr ON cr.id = j.change_request_id
+				WHERE up.action IN ('resume', 'revert') AND up.depth < 100
+			),
+			root AS (
+				SELECT execution_id FROM up ORDER BY depth DESC LIMIT 1
+			),
+			fam AS (
+				SELECT execution_id, 0 AS depth FROM root
+				UNION ALL
+				SELECT j.execution_id, fam.depth + 1
+				FROM fam
+				JOIN change_requests cr ON cr.target_execution_id = fam.execution_id
+					AND cr.action IN ('resume', 'revert')
+				JOIN jobs j ON j.change_request_id = cr.id
+				WHERE fam.depth < 100
+			)
 			SELECT EXISTS (
 				SELECT 1
 				FROM jobs
 				WHERE db_connection_id = $1
 				  AND status IN ('partial', 'uncertain')
 				  AND change_request_id <> $2
-				  AND execution_id::text <> $3
+				  AND execution_id NOT IN (SELECT execution_id FROM fam)
 			)
 		`, dbID, changeRequestID, targetExec.String).Scan(&hasBlockingJob)
 	} else {
