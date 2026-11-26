@@ -1,4 +1,5 @@
 import { useId } from 'react'
+import { downExample, upExample } from './batchExamples'
 
 export type BatchConfig = {
     table: string
@@ -23,9 +24,6 @@ const inputCls = 'mt-1.5 w-full rounded-lg border px-3 py-2 text-sm font-normal 
 function border(err?: string) {
     return err ? 'border-rose-400' : 'border-slate-300'
 }
-
-const upExample = 'UPDATE orders_big SET price = price * 1.1 WHERE id > {{lo}} AND id <= {{hi}};'
-const downExample = 'UPDATE orders_big SET price = price / 1.1 WHERE id > {{lo}} AND id <= {{hi}};'
 
 export default function BatchConfigFields({ value, onChange, disabled = false, errors = {} }: Props) {
     const id = useId()

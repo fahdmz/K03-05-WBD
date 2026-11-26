@@ -74,7 +74,7 @@ export default function ReviewsPage() {
                     disabled={loading}
                     className="rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
                 >
-                    Muat ulang
+                    {loading ? 'Memuat…' : 'Muat ulang'}
                 </button>
             </div>
 
