@@ -113,8 +113,13 @@ func main() {
 	mux.Handle("/api/change-requests/", databaseRoutes)
 	mux.Handle("/api/jobs/", databaseRoutes)
 
+	// /metrics di luar HTTPMiddleware supaya scrape Prometheus tidak membanjiri log
+	root := http.NewServeMux()
+	root.Handle("GET /metrics", newMetrics(db).Handler())
+	root.Handle("/", obs.HTTPMiddleware(mux))
+
 	slog.Info("server.started", "addr", ":8080")
-	if err := http.ListenAndServe(":8080", obs.HTTPMiddleware(mux)); err != nil {
+	if err := http.ListenAndServe(":8080", root); err != nil {
 		fatal("server.stopped", err)
 	}
 }

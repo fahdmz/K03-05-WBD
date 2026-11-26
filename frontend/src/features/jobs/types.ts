@@ -7,6 +7,8 @@ export type Job = {
     migrationId: number
     migrationTitle: string
     action: 'apply' | 'rollback' | 'forward' | 'resume' | 'revert'
+    effectiveAction: 'apply' | 'rollback' | 'forward' | 'revert'
+    direction: 'up' | 'down'
     mode: 'normal' | 'batch'
     executionId: string
     status: JobStatus
@@ -39,8 +41,8 @@ const styles: Record<JobStatus, string> = {
     uncertain: 'bg-violet-50 text-violet-700',
 }
 
-export function statusLabel(job: Pick<Job, 'status' | 'action'>) {
-    if (job.status === 'partial' && job.action === 'revert') return 'Partially reverted'
+export function statusLabel(job: Pick<Job, 'status' | 'effectiveAction'>) {
+    if (job.status === 'partial' && job.effectiveAction === 'revert') return 'Partially reverted'
     return labels[job.status]
 }
 

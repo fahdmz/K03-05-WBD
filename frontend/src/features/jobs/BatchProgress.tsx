@@ -1,11 +1,11 @@
 import { statusLabel, statusStyle, type Job } from './types'
 
 type Props = {
-    job: Pick<Job, 'status' | 'action' | 'batchesCommitted' | 'rowsCommitted'>
+    job: Pick<Job, 'status' | 'effectiveAction' | 'batchesCommitted' | 'rowsCommitted'>
 }
 
 function hint(job: Props['job']) {
-    const revert = job.action === 'revert'
+    const revert = job.effectiveAction === 'revert'
     switch (job.status) {
         case 'queued':
             return 'Menunggu giliran worker.'
@@ -25,7 +25,7 @@ function hint(job: Props['job']) {
 }
 
 export default function BatchProgress({ job }: Props) {
-    const revert = job.action === 'revert'
+    const revert = job.effectiveAction === 'revert'
     const running = job.status === 'running'
 
     return (
