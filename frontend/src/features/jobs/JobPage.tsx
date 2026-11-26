@@ -4,6 +4,7 @@ import Button from '../../components/Button'
 import { api, ApiError, errorMessage } from '../../lib/api'
 import { formatDate } from '../../lib/format'
 import { useToast } from '../../lib/toast'
+import BatchProgress from './BatchProgress'
 import { isActive, statusLabel, statusStyle, type Job } from './types'
 
 type CreatedRequest = { changeRequestId: number }
@@ -106,18 +107,7 @@ export default function JobPage() {
             )}
             {error && <p className="text-sm text-rose-700">{error}</p>}
 
-            {job.mode === 'batch' && (
-                <div className="grid gap-3 sm:grid-cols-2">
-                    <div className="rounded-xl border border-slate-200 bg-white p-4">
-                        <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Batch committed</p>
-                        <p className="mt-1 text-2xl font-semibold text-slate-900">{job.batchesCommitted.toLocaleString('id-ID')}</p>
-                    </div>
-                    <div className="rounded-xl border border-slate-200 bg-white p-4">
-                        <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Baris committed</p>
-                        <p className="mt-1 text-2xl font-semibold text-slate-900">{job.rowsCommitted.toLocaleString('id-ID')}</p>
-                    </div>
-                </div>
-            )}
+            {job.mode === 'batch' && <BatchProgress job={job} />}
 
             {job.status === 'partial' && (
                 <div className="space-y-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">

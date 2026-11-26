@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"github.com/fahdmz/K03-05-WBD/internal/dbmanager"
+	"github.com/fahdmz/K03-05-WBD/internal/metrics"
 	"github.com/fahdmz/K03-05-WBD/internal/obs"
 	"github.com/fahdmz/K03-05-WBD/internal/store"
 	"github.com/fahdmz/K03-05-WBD/internal/worker"
@@ -36,8 +40,37 @@ func main() {
 		fatal("worker.manager_failed", err)
 	}
 
+	n := 4
+	if s := os.Getenv("WORKER_CONCURRENCY"); s != "" {
+		v, err := strconv.Atoi(s)
+		if err != nil || v < 1 {
+			slog.Warn("worker.bad_concurrency", "value", s, "using", n)
+		} else {
+			n = v
+		}
+	}
+
 	w := worker.New(db, manager)
-	slog.Info("worker.started", "worker_id", w.ID())
+	w.SetConcurrency(n)
+
+	// bonus observability: metrics Prometheus di :9091/metrics
+	reg := metrics.New()
+	w.SetMetrics(worker.NewMetrics(reg, db))
+	addr := os.Getenv("WORKER_METRICS_ADDR")
+	if addr == "" {
+		addr = ":9091"
+	}
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", reg.Handler())
+	srv := &http.Server{Addr: addr, Handler: mux}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("worker.metrics_failed", "addr", addr, "error", err.Error())
+		}
+	}()
+	defer srv.Shutdown(context.Background())
+
+	slog.Info("worker.started", "worker_id", w.ID(), "concurrency", n)
 	w.Run(ctx)
 	slog.Info("worker.stopped", "worker_id", w.ID())
 }
