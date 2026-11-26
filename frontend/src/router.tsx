@@ -5,6 +5,8 @@ import Layout from './components/Layout'
 import AdminPage from './features/admin/AdminPage'
 import LoginPage from './features/auth/LoginPage'
 import DatabasesPage from './features/databases/DatabasesPage'
+import ChangeRequestPage from './features/reviews/ChangeRequestPage'
+import ReviewsPage from './features/reviews/ReviewsPage'
 import { useAuth } from './lib/auth'
 
 function AdminRoute() {
@@ -21,6 +23,8 @@ export const router = createBrowserRouter([
                 element: <Layout />,
                 children: [
                     { path: '/', element: <DatabasesPage /> },
+                    { path: '/reviews', element: <ReviewsPage /> },
+                    { path: '/change-requests/:id', element: <ChangeRequestPage /> },
                     {
                         element: <RequireAdmin />,
                         children: [{ path: '/admin', element: <AdminRoute /> }],

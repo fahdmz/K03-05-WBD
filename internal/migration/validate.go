@@ -19,7 +19,7 @@ const (
 )
 
 type ValidationResult struct {
-	Valid    bool     `jason:"valid"`
+	Valid    bool     `json:"valid"`
 	Errors   []string `json:"errors"`
 	Warnings []string `json:"warnings"`
 }

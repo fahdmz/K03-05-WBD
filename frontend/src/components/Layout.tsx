@@ -7,12 +7,15 @@ export default function Layout() {
     return (
         <div className="min-h-screen bg-slate-50 text-slate-900">
             <header className="border-b border-slate-200 bg-white">
-                <nav className="mx-auto flex max-w-6xl items-center gap-6 px-4 py-3">
+                <nav className="mx-auto flex max-w-6xl flex-wrap items-center gap-4 px-4 py-3 sm:gap-6">
                     <Link to="/" className="font-semibold">
                         DB Platform
                     </Link>
                     <Link to="/" className="text-sm text-slate-600 hover:text-slate-900">
                         Databases
+                    </Link>
+                    <Link to="/reviews" className="text-sm text-slate-600 hover:text-slate-900">
+                        Reviews
                     </Link>
                     {user?.isAdmin && (
                         <Link to="/admin" className="text-sm text-slate-600 hover:text-slate-900">

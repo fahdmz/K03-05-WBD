@@ -14,6 +14,7 @@ export type Group = {
   id: number
   name: string
   description: string
+  leaderUserId: number | null
   memberIds: number[]
   access: Access[]
 }

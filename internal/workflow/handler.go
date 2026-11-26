@@ -88,6 +88,7 @@ type ChangeRequestDetail struct {
 	BatchColumn        *string `json:"batchColumn"`
 	BatchSize          *int    `json:"batchSize"`
 	Approval           Status  `json:"approval"`
+	CanRun             bool    `json:"canRun"`
 }
 
 func (h *Handler) listByDatabase(w http.ResponseWriter, r *http.Request) {
@@ -236,6 +237,9 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	if !h.authorize(w, r.Context(), user.ID, detail.DatabaseID, authz.View) {
 		return
 	}
+	if level, err := h.authorizer.EffectiveLevel(r.Context(), user.ID, detail.DatabaseID); err == nil {
+		detail.CanRun = level == authz.Edit
+	}
 	web.WriteJSON(w, http.StatusOK, detail)
 }
 
@@ -370,6 +374,9 @@ func (h *Handler) decide(w http.ResponseWriter, r *http.Request, decision string
 	if err != nil {
 		web.WriteError(w, http.StatusInternalServerError, "Keputusan tersimpan tetapi gagal membaca detail")
 		return
+	}
+	if level, err := h.authorizer.EffectiveLevel(r.Context(), user.ID, detail.DatabaseID); err == nil {
+		detail.CanRun = level == authz.Edit
 	}
 	web.WriteJSON(w, http.StatusOK, detail)
 }
