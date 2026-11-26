@@ -3,6 +3,8 @@ package obs
 import (
 	"net/http"
 	"time"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 type statusRecorder struct {
@@ -16,7 +18,7 @@ func (r *statusRecorder) WriteHeader(code int) {
 }
 
 func HTTPMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	logged := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
@@ -33,4 +35,9 @@ func HTTPMiddleware(next http.Handler) http.Handler {
 		}
 		Logger(r.Context()).Info("http.request", attrs...)
 	})
+	return otelhttp.NewHandler(logged, "http.request",
+		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+			return r.Method + " " + r.URL.Path
+		}),
+	)
 }
