@@ -2,6 +2,7 @@ package obs
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"os"
 	"time"
@@ -11,10 +12,21 @@ import (
 
 type loggerKey struct{}
 
-var base = slog.New(slog.NewJSONHandler(os.Stdout, nil))
+var base = slog.New(newHandler(os.Stdout))
+
+func newHandler(w io.Writer) slog.Handler {
+	return slog.NewJSONHandler(w, &slog.HandlerOptions{
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if len(groups) == 0 && a.Key == slog.MessageKey {
+				a.Key = "event"
+			}
+			return a
+		},
+	})
+}
 
 func Setup(service string) (func(context.Context) error, error) {
-	base = slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", service)
+	base = slog.New(newHandler(os.Stdout)).With("service", service)
 	slog.SetDefault(base)
 	return setupTracing(service)
 }

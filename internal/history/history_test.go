@@ -519,3 +519,69 @@ func TestJobEndpoints(t *testing.T) {
 		t.Fatalf("resume job non-batch: status = %d, want 409", rec.Code)
 	}
 }
+
+func (f *fixture) newJob(action Action, migrationID, revisionID int64, target *string, status string) (int64, string) {
+	f.t.Helper()
+	ctx := context.Background()
+	var requestID, jobID int64
+	var executionID string
+	if err := f.db.QueryRow(ctx, `
+		INSERT INTO change_requests (db_connection_id, migration_id, revision_id, action, target_execution_id, status, requested_by)
+		VALUES ($1, $2, $3, $4, $5, 'queued', $6) RETURNING id`, f.dbID, migrationID, revisionID, string(action), target, f.userID,
+	).Scan(&requestID); err != nil {
+		f.t.Fatalf("buat change request %s: %v", action, err)
+	}
+	if err := f.db.QueryRow(ctx, `
+		INSERT INTO jobs (change_request_id, db_connection_id, execution_id, status)
+		VALUES ($1, $2, gen_random_uuid(), $3) RETURNING id, execution_id::text`, requestID, f.dbID, status,
+	).Scan(&jobID, &executionID); err != nil {
+		f.t.Fatalf("buat job %s: %v", action, err)
+	}
+	return jobID, executionID
+}
+
+func (f *fixture) getJob(jobID int64) Job {
+	f.t.Helper()
+	rec := f.call(authz.AllowAll{}, http.MethodGet, fmt.Sprintf("/api/jobs/%d", jobID))
+	if rec.Code != http.StatusOK {
+		f.t.Fatalf("get job %d: status = %d: %s", jobID, rec.Code, rec.Body.String())
+	}
+	var job Job
+	if err := json.NewDecoder(rec.Body).Decode(&job); err != nil {
+		f.t.Fatalf("decode job: %v", err)
+	}
+	return job
+}
+
+func TestJobEffectiveAction(t *testing.T) {
+	f := newFixture(t)
+	a, ra := f.newMigration("A", false)
+
+	applyJob, applyExec := f.newJob(Apply, a, ra, nil, "partial")
+	revertJob, revertExec := f.newJob(Revert, a, ra, &applyExec, "partial")
+	resumeJob, _ := f.newJob(Resume, a, ra, &revertExec, "queued")
+
+	origin := f.getJob(applyJob)
+	if origin.EffectiveAction != "apply" || origin.Direction != "up" {
+		t.Fatalf("job apply = %s/%s, want apply/up", origin.EffectiveAction, origin.Direction)
+	}
+	revert := f.getJob(revertJob)
+	if revert.EffectiveAction != "revert" || revert.Direction != "down" {
+		t.Fatalf("job revert = %s/%s, want revert/down", revert.EffectiveAction, revert.Direction)
+	}
+	resume := f.getJob(resumeJob)
+	if resume.Action != "resume" || resume.EffectiveAction != "revert" || resume.Direction != "down" {
+		t.Fatalf("job resume = %s/%s/%s, want resume/revert/down", resume.Action, resume.EffectiveAction, resume.Direction)
+	}
+
+	rec := f.call(authz.AllowAll{}, http.MethodGet, fmt.Sprintf("/api/databases/%d/jobs", f.dbID))
+	var jobs []Job
+	if err := json.NewDecoder(rec.Body).Decode(&jobs); err != nil || len(jobs) != 3 {
+		t.Fatalf("list jobs = %d item, err %v", len(jobs), err)
+	}
+	for _, j := range jobs {
+		if j.ID == resumeJob && (j.EffectiveAction != "revert" || j.Direction != "down") {
+			t.Fatalf("list job resume = %s/%s, want revert/down", j.EffectiveAction, j.Direction)
+		}
+	}
+}

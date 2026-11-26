@@ -3,6 +3,7 @@ package history
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -67,6 +68,8 @@ type Job struct {
 	MigrationID      int64      `json:"migrationId"`
 	MigrationTitle   string     `json:"migrationTitle"`
 	Action           string     `json:"action"`
+	EffectiveAction  string     `json:"effectiveAction"`
+	Direction        string     `json:"direction"`
 	Mode             string     `json:"mode"`
 	ExecutionID      string     `json:"executionId"`
 	Status           string     `json:"status"`
@@ -79,6 +82,7 @@ type Job struct {
 	CreatedAt        time.Time  `json:"createdAt"`
 	StartedAt        *time.Time `json:"startedAt"`
 	FinishedAt       *time.Time `json:"finishedAt"`
+	target           *string
 }
 
 func HideRollback(entries []Entry) []Entry {
@@ -315,7 +319,8 @@ func (h *Handler) listHistory(w http.ResponseWriter, r *http.Request) {
 const jobSelect = `
 	SELECT j.id, j.change_request_id, j.db_connection_id, cr.migration_id, m.title, cr.action, rv.mode,
 	       j.execution_id::text, j.status, j.attempt, j.max_attempts, j.batches_committed,
-	       j.rows_committed, j.last_error, j.last_sqlstate, j.created_at, j.started_at, j.finished_at
+	       j.rows_committed, j.last_error, j.last_sqlstate, j.created_at, j.started_at, j.finished_at,
+	       cr.target_execution_id::text
 	FROM jobs j
 	JOIN change_requests cr ON cr.id = j.change_request_id
 	JOIN migrations m ON m.id = cr.migration_id
@@ -328,8 +333,41 @@ func scanJob(row pgx.Row) (Job, error) {
 		&j.ID, &j.ChangeRequestID, &j.DatabaseID, &j.MigrationID, &j.MigrationTitle, &j.Action, &j.Mode,
 		&j.ExecutionID, &j.Status, &j.Attempt, &j.MaxAttempts, &j.BatchesCommitted,
 		&j.RowsCommitted, &j.LastError, &j.LastSQLState, &j.CreatedAt, &j.StartedAt, &j.FinishedAt,
+		&j.target,
 	)
 	return j, err
+}
+
+func jobOrigin(ctx context.Context, q store.Querier, action Action, target *string) (Action, Direction, error) {
+	switch action {
+	case Apply, Forward:
+		return action, Up, nil
+	case Rollback:
+		return Rollback, Down, nil
+	case Resume, Revert:
+		if target == nil {
+			return "", "", fmt.Errorf("job %s tidak punya execution ID tujuan", action)
+		}
+		o, err := traceOrigin(ctx, q, *target, 0)
+		if err != nil {
+			return "", "", err
+		}
+		if action == Resume {
+			return o.action, o.direction, nil
+		}
+		return Revert, opposite(o.direction), nil
+	default:
+		return "", "", fmt.Errorf("aksi %q tidak dikenal", action)
+	}
+}
+
+func (h *Handler) fillOrigin(ctx context.Context, j *Job) error {
+	action, direction, err := jobOrigin(ctx, h.platform, Action(j.Action), j.target)
+	if err != nil {
+		return err
+	}
+	j.EffectiveAction, j.Direction = string(action), string(direction)
+	return nil
 }
 
 func (h *Handler) getJob(w http.ResponseWriter, r *http.Request) {
@@ -353,6 +391,10 @@ func (h *Handler) getJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.authorize(w, ctx, user.ID, job.DatabaseID, authz.View) {
+		return
+	}
+	if err := h.fillOrigin(ctx, &job); err != nil {
+		web.WriteError(w, http.StatusInternalServerError, "Gagal membaca job")
 		return
 	}
 	web.WriteJSON(w, http.StatusOK, job)
@@ -394,6 +436,13 @@ func (h *Handler) listJobs(w http.ResponseWriter, r *http.Request) {
 	if err := rows.Err(); err != nil {
 		web.WriteError(w, http.StatusInternalServerError, "Gagal membaca daftar job")
 		return
+	}
+	rows.Close()
+	for i := range jobs {
+		if err := h.fillOrigin(ctx, &jobs[i]); err != nil {
+			web.WriteError(w, http.StatusInternalServerError, "Gagal membaca daftar job")
+			return
+		}
 	}
 	web.WriteJSON(w, http.StatusOK, jobs)
 }

@@ -79,6 +79,7 @@ export default function JobPage() {
     }
 
     const active = isActive(job.status)
+    const actionLabel = job.effectiveAction === job.action ? job.action : `${job.action} (${job.effectiveAction})`
 
     return (
         <div className="space-y-6">
@@ -91,7 +92,7 @@ export default function JobPage() {
                     <p className="text-sm font-medium uppercase tracking-[0.18em] text-cyan-700">Job #{job.id}</p>
                     <h1 className="mt-2 break-words text-2xl font-semibold text-slate-950 sm:text-3xl">{job.migrationTitle}</h1>
                     <p className="mt-1 text-sm text-slate-500">
-                        {job.action} · mode {job.mode}
+                        {actionLabel} · mode {job.mode}
                     </p>
                 </div>
                 <span className={`self-start rounded-full px-3 py-1 text-sm font-semibold ${statusStyle(job.status)}`}>
@@ -151,6 +152,7 @@ export default function JobPage() {
             )}
 
             <dl className="grid gap-4 rounded-xl border border-slate-200 bg-white p-4 sm:grid-cols-2">
+                <Field label="Arah" value={job.direction} />
                 <Field label="Attempt" value={`${job.attempt} dari ${job.maxAttempts}`} />
                 <Field label="Change request" value={`#${job.changeRequestId}`} />
                 <Field label="Dibuat" value={formatDate(job.createdAt)} />

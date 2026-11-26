@@ -38,7 +38,7 @@ func (pgxTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.Trac
 			attribute.String("db.statement", sql),
 		),
 	)
-	start := queryStart{sql: sql, params: safeParams(data.Args), at: time.Now(), span: span}
+	start := queryStart{sql: sql, params: safeParams(queryArgs(data.Args)), at: time.Now(), span: span}
 	if event == "sql.result" {
 		Logger(ctx).Info("sql.start", "query", start.sql, "params", start.params)
 	}
@@ -76,6 +76,18 @@ func (pgxTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQ
 	}
 	Logger(ctx).Info(event, append(attrs, "status", "ok")...)
 	start.span.End()
+}
+
+func queryArgs(args []any) []any {
+	out := make([]any, 0, len(args))
+	for _, a := range args {
+		switch a.(type) {
+		case pgx.QueryExecMode, pgx.QueryResultFormats, pgx.QueryResultFormatsByOID:
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 func sqlEvent(sql string) string {

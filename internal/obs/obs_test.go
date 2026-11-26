@@ -1,6 +1,13 @@
 package obs
 
-import "testing"
+import (
+	"bytes"
+	"encoding/json"
+	"log/slog"
+	"testing"
+
+	"github.com/jackc/pgx/v5"
+)
 
 func TestRedact(t *testing.T) {
 	cases := []struct {
@@ -42,6 +49,41 @@ func TestSQLEvent(t *testing.T) {
 	for in, want := range cases {
 		if got := sqlEvent(in); got != want {
 			t.Errorf("sqlEvent(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestLogEventKey(t *testing.T) {
+	var buf bytes.Buffer
+	slog.New(newHandler(&buf)).Info("sql.result", "rows", 1)
+
+	var line map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &line); err != nil {
+		t.Fatalf("log bukan JSON: %v: %s", err, buf.String())
+	}
+	if line["event"] != "sql.result" {
+		t.Fatalf("event = %v, want sql.result: %s", line["event"], buf.String())
+	}
+	if _, ok := line["msg"]; ok {
+		t.Fatalf("kunci msg masih ada: %s", buf.String())
+	}
+}
+
+func TestQueryArgs(t *testing.T) {
+	if got := queryArgs([]any{pgx.QueryExecModeSimpleProtocol}); len(got) != 0 {
+		t.Fatalf("queryArgs(simple protocol) = %v, want []", got)
+	}
+	got := queryArgs([]any{
+		pgx.QueryExecModeExec, int64(7), pgx.QueryResultFormats{pgx.BinaryFormatCode},
+		"x", pgx.QueryResultFormatsByOID{25: pgx.TextFormatCode},
+	})
+	want := []any{int64(7), "x"}
+	if len(got) != len(want) {
+		t.Fatalf("queryArgs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("arg %d = %v, want %v", i, got[i], want[i])
 		}
 	}
 }
