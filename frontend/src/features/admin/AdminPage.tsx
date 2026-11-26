@@ -127,6 +127,7 @@ function EditorDialog({
   const formRef = useRef<HTMLFormElement>(null)
   const operationPending = useRef(false)
   const [busy, setBusy] = useState(false)
+  const [testing, setTesting] = useState(false)
   const [error, setError] = useState('')
   const [testResult, setTestResult] = useState('')
 
@@ -164,6 +165,7 @@ function EditorDialog({
 
     operationPending.current = true
     setBusy(true)
+    setTesting(true)
     setError('')
     setTestResult('')
 
@@ -179,6 +181,7 @@ function EditorDialog({
     } finally {
       operationPending.current = false
       setBusy(false)
+      setTesting(false)
     }
   }
 
@@ -585,7 +588,7 @@ function EditorDialog({
         <footer className="admin-dialog-footer">
           {editor.kind === 'database' && (
             <button type="button" onClick={testConnection} disabled={busy}>
-              Test connection
+              {testing ? 'Menguji…' : 'Test connection'}
             </button>
           )}
           <button type="button" onClick={onClose} disabled={busy}>Batal</button>
@@ -712,7 +715,7 @@ export default function AdminPage({
             disabled={loading}
             onClick={() => setRevision((value) => value + 1)}
           >
-            Muat ulang
+            {loading ? 'Memuat…' : 'Muat ulang'}
           </button>
           <button
             type="button"

@@ -201,7 +201,7 @@ export default function DatabasesPage() {
                     </button>
                 ) : (
                     <button onClick={() => void loadDatabases()} disabled={loading === 'databases'} className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50">
-                        Muat ulang
+                        {loading === 'databases' ? 'Memuat…' : 'Muat ulang'}
                     </button>
                 )}
             </div>
@@ -371,8 +371,8 @@ export default function DatabasesPage() {
                                                 <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                                                     <p className="text-sm text-slate-500">{tableRows.total.toLocaleString()} baris · halaman {page}</p>
                                                     <div className="flex gap-2">
-                                                        <button disabled={!canGoBack} onClick={() => void loadTable(selectedDatabase, selectedSchema, selectedTable, page - 1)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">Sebelumnya</button>
-                                                        <button disabled={!canGoForward} onClick={() => void loadTable(selectedDatabase, selectedSchema, selectedTable, page + 1)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">Berikutnya</button>
+                                                        <button disabled={!canGoBack || loading === 'table'} onClick={() => void loadTable(selectedDatabase, selectedSchema, selectedTable, page - 1)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">Sebelumnya</button>
+                                                        <button disabled={!canGoForward || loading === 'table'} onClick={() => void loadTable(selectedDatabase, selectedSchema, selectedTable, page + 1)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">Berikutnya</button>
                                                     </div>
                                                 </div>
                                                 {tableRows.columns.length === 0 ? <EmptyState>Tabel ini belum memiliki kolom atau data.</EmptyState> : (

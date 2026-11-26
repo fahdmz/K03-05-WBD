@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { api, ApiError } from '../../lib/api'
 import ExplainPanel from './ExplainPanel'
+import { downExample, upExample } from './batchExamples'
 
 type DatabaseSummary = {
     id: number
@@ -212,6 +213,11 @@ export default function MigrationWorkspace({ database }: { database: DatabaseSum
         setError('')
     }
 
+    function applyExample(current: string, example: string, set: (value: string) => void) {
+        if (current.trim() !== '' && !window.confirm('Isi SQL saat ini akan ditimpa dengan contoh. Lanjutkan?')) return
+        set(example)
+    }
+
     async function saveDraft(event: FormEvent<HTMLFormElement>) {
         event.preventDefault()
         setSaving(true)
@@ -317,7 +323,7 @@ export default function MigrationWorkspace({ database }: { database: DatabaseSum
                         disabled={loading}
                         className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
                     >
-                        Muat ulang
+                        {loading ? 'Memuat…' : 'Muat ulang'}
                     </button>
                 </div>
                 {canEdit && (
@@ -485,22 +491,38 @@ export default function MigrationWorkspace({ database }: { database: DatabaseSum
                             </div>
                         )}
 
-                        <label className="block text-sm font-medium text-slate-700">
-                            SQL Up
+                        <div>
+                            <div className="flex items-center justify-between gap-2">
+                                <label htmlFor="migration-sql-up" className="text-sm font-medium text-slate-700">
+                                    SQL Up
+                                </label>
+                                {mode === 'batch' && (
+                                    <button
+                                        type="button"
+                                        onClick={() => applyExample(sqlUp, upExample, setSQLUp)}
+                                        className="rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                                    >
+                                        Pakai contoh
+                                    </button>
+                                )}
+                            </div>
                             <textarea
+                                id="migration-sql-up"
                                 value={sqlUp}
                                 onChange={(e) => setSQLUp(e.target.value)}
+                                onKeyDown={(e) => {
+                                    if (mode === 'batch' && e.key === 'Tab' && !e.shiftKey && sqlUp.trim() === '') {
+                                        e.preventDefault()
+                                        setSQLUp(upExample)
+                                    }
+                                }}
                                 required
                                 rows={10}
                                 spellCheck={false}
                                 className="mt-1.5 w-full resize-y overflow-x-auto rounded-xl border border-slate-300 bg-slate-950 px-4 py-3 font-mono text-sm leading-6 text-slate-100 outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
-                                placeholder={
-                                    mode === 'batch'
-                                        ? 'UPDATE orders_big SET price = price * 1.1 WHERE id > {{lo}} AND id <= {{hi}};'
-                                        : 'ALTER TABLE customers ADD COLUMN email TEXT;'
-                                }
+                                placeholder={mode === 'batch' ? upExample : 'ALTER TABLE customers ADD COLUMN email TEXT;'}
                             />
-                        </label>
+                        </div>
 
                         <label className="flex cursor-pointer items-center gap-2 text-sm font-medium text-slate-700">
                             <input
@@ -523,21 +545,37 @@ export default function MigrationWorkspace({ database }: { database: DatabaseSum
                                 />
                             </label>
                         ) : (
-                            <label className="block text-sm font-medium text-slate-700">
-                                SQL Down (untuk rollback)
+                            <div>
+                                <div className="flex items-center justify-between gap-2">
+                                    <label htmlFor="migration-sql-down" className="text-sm font-medium text-slate-700">
+                                        SQL Down (untuk rollback)
+                                    </label>
+                                    {mode === 'batch' && (
+                                        <button
+                                            type="button"
+                                            onClick={() => applyExample(sqlDown, downExample, setSQLDown)}
+                                            className="rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                                        >
+                                            Pakai contoh
+                                        </button>
+                                    )}
+                                </div>
                                 <textarea
+                                    id="migration-sql-down"
                                     value={sqlDown}
                                     onChange={(e) => setSQLDown(e.target.value)}
+                                    onKeyDown={(e) => {
+                                        if (mode === 'batch' && e.key === 'Tab' && !e.shiftKey && sqlDown.trim() === '') {
+                                            e.preventDefault()
+                                            setSQLDown(downExample)
+                                        }
+                                    }}
                                     rows={7}
                                     spellCheck={false}
                                     className="mt-1.5 w-full resize-y overflow-x-auto rounded-xl border border-slate-300 bg-slate-950 px-4 py-3 font-mono text-sm leading-6 text-slate-100 outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
-                                    placeholder={
-                                        mode === 'batch'
-                                            ? 'UPDATE orders_big SET price = price / 1.1 WHERE id > {{lo}} AND id <= {{hi}};'
-                                            : 'ALTER TABLE customers DROP COLUMN email;'
-                                    }
+                                    placeholder={mode === 'batch' ? downExample : 'ALTER TABLE customers DROP COLUMN email;'}
                                 />
-                            </label>
+                            </div>
                         )}
 
                         <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-4">

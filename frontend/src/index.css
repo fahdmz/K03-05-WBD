@@ -1,1 +1,19 @@
 @import "tailwindcss";
+
+@layer base {
+  button {
+    transition: transform 120ms ease, filter 120ms ease, background-color 150ms ease,
+      border-color 150ms ease, color 150ms ease, box-shadow 150ms ease, opacity 150ms ease;
+  }
+
+  button:not(:disabled):active {
+    transform: scale(0.97);
+    filter: brightness(0.9);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    button:not(:disabled):active {
+      transform: none;
+    }
+  }
+}
