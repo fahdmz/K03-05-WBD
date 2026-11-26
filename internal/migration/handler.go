@@ -21,7 +21,6 @@ import (
 )
 
 const maxRequestBodyBytes = 1 << 20
-const maxStoredErrorBytes = 2000
 
 var errMigrationNotFound = errors.New("migration not found")
 
@@ -43,39 +42,86 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/databases/{id}/migrations", h.create)
 	mux.HandleFunc("GET /api/migrations/{id}", h.get)
 	mux.HandleFunc("PATCH /api/migrations/{id}", h.update)
-	mux.HandleFunc("POST /api/migrations/{id}/execute", h.execute)
+	mux.HandleFunc("POST /api/migrations/{id}/validate", h.validate)
+	mux.HandleFunc("POST /api/migrations/{id}/submit", h.submit)
 }
 
-type Migration struct {
-	ID           int64      `json:"id"`
-	DatabaseID   int64      `json:"databaseId"`
-	Version      *int       `json:"version"`
-	Title        string     `json:"title"`
-	SQL          string     `json:"sql"`
-	Status       string     `json:"status"`
-	CreatedBy    string     `json:"createdBy"`
-	ExecutedBy   *string    `json:"executedBy"`
-	CreatedAt    time.Time  `json:"createdAt"`
-	ExecutedAt   *time.Time `json:"executedAt"`
-	ErrorMessage *string    `json:"errorMessage"`
+type Revision struct {
+	ID                 int64      `json:"id"`
+	MigrationID        int64      `json:"migrationId"`
+	RevisionNo         int        `json:"revisionNo"`
+	Status             string     `json:"status"`
+	SQLUp              string     `json:"sqlUp"`
+	SQLDown            *string    `json:"sqlDown"`
+	Irreversible       bool       `json:"irreversible"`
+	IrreversibleReason *string    `json:"irreversibleReason"`
+	Mode               string     `json:"mode"`
+	BatchTable         *string    `json:"batchTable"`
+	BatchColumn        *string    `json:"batchColumn"`
+	BatchSize          *int       `json:"batchSize"`
+	CreatedBy          string     `json:"createdBy"`
+	CreatedAt          time.Time  `json:"createdAt"`
+	SubmittedAt        *time.Time `json:"submittedAt"`
+}
+
+func (r Revision) toSpec() RevisionSpec {
+	return RevisionSpec{
+		Mode:               r.Mode,
+		SQLUp:              r.SQLUp,
+		SQLDown:            r.SQLDown,
+		Irreversible:       r.Irreversible,
+		IrreversibleReason: r.IrreversibleReason,
+		BatchTable:         r.BatchTable,
+		BatchColumn:        r.BatchColumn,
+		BatchSize:          r.BatchSize,
+	}
+}
+
+type ChangeRequestSummary struct {
+	ID                int64           `json:"id"`
+	RevisionID        int64           `json:"revisionId"`
+	Action            string          `json:"action"`
+	TargetExecutionID *string         `json:"targetExecutionId"`
+	Status            string          `json:"status"`
+	Validation        json.RawMessage `json:"validation"`
+	RequestedBy       string          `json:"requestedBy"`
+	CreatedAt         time.Time       `json:"createdAt"`
+	UpdatedAt         time.Time       `json:"updatedAt"`
+}
+
+type MigrationSummary struct {
+	ID                  int64     `json:"id"`
+	DatabaseID          int64     `json:"databaseId"`
+	Version             *int      `json:"version"`
+	IsApplied           bool      `json:"isApplied"`
+	Title               string    `json:"title"`
+	CreatedBy           string    `json:"createdBy"`
+	CreatedAt           time.Time `json:"createdAt"`
+	CurrentRevision     *Revision `json:"currentRevision"`
+	LatestRequestStatus *string   `json:"latestRequestStatus"`
+}
+
+type MigrationDetail struct {
+	MigrationSummary
+	Revisions      []Revision             `json:"revisions"`
+	ChangeRequests []ChangeRequestSummary `json:"changeRequests"`
 }
 
 type migrationInput struct {
-	Title string `json:"title"`
-	SQL   string `json:"sql"`
+	Title              string  `json:"title"`
+	Mode               string  `json:"mode"`
+	SQLUp              string  `json:"sqlUp"`
+	SQLDown            *string `json:"sqlDown"`
+	Irreversible       bool    `json:"irreversible"`
+	IrreversibleReason *string `json:"irreversibleReason"`
+	BatchTable         *string `json:"batchTable"`
+	BatchColumn        *string `json:"batchColumn"`
+	BatchSize          *int    `json:"batchSize"`
 }
 
 type rowScanner interface {
 	Scan(dest ...any) error
 }
-
-const migrationSelect = `
-	SELECT m.id, m.db_connection_id, m.version, m.title, m.sql, m.status,
-	       creator.username, executor.username, m.created_at, m.executed_at, m.error_message
-	FROM migrations m
-	JOIN users creator ON creator.id = m.created_by
-	LEFT JOIN users executor ON executor.id = m.executed_by
-`
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	dbID, ok := pathID(w, r, "id")
@@ -99,9 +145,9 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	result := make([]Migration, 0)
+	result := make([]MigrationSummary, 0)
 	for rows.Next() {
-		item, err := scanMigration(rows)
+		item, err := scanMigrationSummary(rows)
 		if err != nil {
 			web.WriteError(w, http.StatusInternalServerError, "Gagal membaca riwayat migration")
 			return
@@ -131,22 +177,55 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	if !h.databaseExists(w, r.Context(), dbID) {
 		return
 	}
-
-	var id int64
-	err := h.platform.QueryRow(r.Context(), `
-		INSERT INTO migrations (db_connection_id, title, sql, status, created_by)
-		VALUES ($1, $2, $3, 'draft', $4)
-		RETURNING id`, dbID, input.Title, input.SQL, user.ID).Scan(&id)
+	tx, err := h.platform.Begin(r.Context())
 	if err != nil {
 		web.WriteError(w, http.StatusInternalServerError, "Gagal membuat draft migration")
 		return
 	}
-	item, err := h.loadMigration(r.Context(), h.platform, id)
+	defer tx.Rollback(r.Context())
+	var migrationID int64
+	err = tx.QueryRow(r.Context(), `
+		INSERT INTO migrations (db_connection_id, title, sql, status, created_by)
+		VALUES ($1, $2, $3, 'draft', $4)
+		RETURNING id
+	`, dbID, input.Title, input.SQLUp, user.ID).Scan(&migrationID)
+	if err != nil {
+		web.WriteError(w, http.StatusInternalServerError, "Gagal membuat draft migration")
+		return
+	}
+	var revisionID int64
+	err = tx.QueryRow(r.Context(), `
+		INSERT INTO migration_revisions (
+			migration_id, revision_no, status, sql_up, sql_down,
+			irreversible, irreversible_reason, mode,
+			batch_table, batch_column, batch_size, created_by
+		) VALUES ($1, 1, 'draft', $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		RETURNING id
+	`,
+		migrationID, input.SQLUp, input.SQLDown,
+		input.Irreversible, input.IrreversibleReason, input.Mode,
+		input.BatchTable, input.BatchColumn, input.BatchSize, user.ID,
+	).Scan(&revisionID)
+	if err != nil {
+		web.WriteError(w, http.StatusInternalServerError, "Gagal membuat revisi migration")
+		return
+	}
+	if _, err := tx.Exec(r.Context(), `
+		UPDATE migrations SET current_revision_id = $2 WHERE id = $1
+	`, migrationID, revisionID); err != nil {
+		web.WriteError(w, http.StatusInternalServerError, "Gagal menautkan revisi migration")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		web.WriteError(w, http.StatusInternalServerError, "Gagal menyimpan draft migration")
+		return
+	}
+	detail, err := h.loadMigrationDetail(r.Context(), h.platform, migrationID)
 	if err != nil {
 		web.WriteError(w, http.StatusInternalServerError, "Draft migration berhasil dibuat tetapi gagal dibaca")
 		return
 	}
-	web.WriteJSON(w, http.StatusCreated, item)
+	web.WriteJSON(w, http.StatusCreated, detail)
 }
 
 func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
@@ -174,7 +253,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	if !h.authorize(w, r.Context(), user.ID, dbID, authz.View) {
 		return
 	}
-	item, err := h.loadMigration(r.Context(), h.platform, id)
+	item, err := h.loadMigrationDetail(r.Context(), h.platform, id)
 	if errors.Is(err, errMigrationNotFound) {
 		web.WriteError(w, http.StatusNotFound, "Migration tidak ditemukan")
 		return
@@ -199,7 +278,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dbID, status, err := h.migrationLocation(r.Context(), id)
+	dbID, err := h.migrationDatabaseID(r.Context(), id)
 	if errors.Is(err, errMigrationNotFound) {
 		web.WriteError(w, http.StatusNotFound, "Migration tidak ditemukan")
 		return
@@ -209,79 +288,26 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.authorize(w, r.Context(), user.ID, dbID, authz.Edit) {
-		return
-	}
-	if status != "draft" {
-		web.WriteError(w, http.StatusBadRequest, "Hanya draft yang bisa diubah")
 		return
 	}
 	input, ok := decodeMigrationInput(w, r)
 	if !ok {
 		return
 	}
-
-	tag, err := h.platform.Exec(r.Context(), `
-		UPDATE migrations SET title = $2, sql = $3
-		WHERE id = $1 AND status = 'draft'`, id, input.Title, input.SQL)
+	tx, err := h.platform.Begin(r.Context())
 	if err != nil {
-		web.WriteError(w, http.StatusInternalServerError, "Gagal mengubah draft migration")
+		web.WriteError(w, http.StatusInternalServerError, "Gagal memulai transaksi")
 		return
 	}
-	if tag.RowsAffected() == 0 {
-		web.WriteError(w, http.StatusBadRequest, "Hanya draft yang bisa diubah")
-		return
-	}
-	item, err := h.loadMigration(r.Context(), h.platform, id)
-	if err != nil {
-		web.WriteError(w, http.StatusInternalServerError, "Draft migration berhasil diubah tetapi gagal dibaca")
-		return
-	}
-	web.WriteJSON(w, http.StatusOK, item)
-}
-
-func (h *Handler) execute(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathID(w, r, "id")
-	if !ok {
-		return
-	}
-	user, ok := h.requireUser(w, r)
-	if !ok {
-		return
-	}
-	if !h.configured(w) {
-		return
-	}
-	if h.manager == nil {
-		web.WriteError(w, http.StatusInternalServerError, "Migration belum dikonfigurasi")
-		return
-	}
-
-	dbID, _, err := h.migrationLocation(r.Context(), id)
-	if errors.Is(err, errMigrationNotFound) {
-		web.WriteError(w, http.StatusNotFound, "Migration tidak ditemukan")
-		return
-	}
-	if err != nil {
-		web.WriteError(w, http.StatusInternalServerError, "Gagal membaca migration")
-		return
-	}
-	if !h.authorize(w, r.Context(), user.ID, dbID, authz.Edit) {
-		return
-	}
-
-	platformTx, err := h.platform.Begin(r.Context())
-	if err != nil {
-		web.WriteError(w, http.StatusInternalServerError, "Gagal memulai pencatatan migration")
-		return
-	}
-	defer platformTx.Rollback(r.Context())
-
-	var lockedDBID int64
-	var status, sql string
-	err = platformTx.QueryRow(r.Context(), `
-		SELECT db_connection_id, status, sql
-		FROM migrations WHERE id = $1 FOR UPDATE`, id,
-	).Scan(&lockedDBID, &status, &sql)
+	defer tx.Rollback(r.Context())
+	var version pgtype.Int4
+	var currentRevID pgtype.Int8
+	err = tx.QueryRow(r.Context(), `
+		SELECT version, current_revision_id
+		FROM migrations
+		WHERE id = $1
+		FOR UPDATE
+	`, id).Scan(&version, &currentRevID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		web.WriteError(w, http.StatusNotFound, "Migration tidak ditemukan")
 		return
@@ -290,198 +316,86 @@ func (h *Handler) execute(w http.ResponseWriter, r *http.Request) {
 		web.WriteError(w, http.StatusInternalServerError, "Gagal mengunci migration")
 		return
 	}
-	if lockedDBID != dbID {
-		web.WriteError(w, http.StatusInternalServerError, "Database migration berubah")
-		return
-	}
-	if status != "draft" {
-		web.WriteError(w, http.StatusBadRequest, "Hanya draft yang bisa dieksekusi")
-		return
-	}
-
-	// Kunci database target biar migration yang jalan barengan nggak tabrakan
-	// Nomor versi juga ditentuin saat kuncinya masih aktif
-	var lockedConnectionID int64
-	err = platformTx.QueryRow(r.Context(), `
-		SELECT id FROM db_connections WHERE id = $1 FOR UPDATE`, dbID,
-	).Scan(&lockedConnectionID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		web.WriteError(w, http.StatusNotFound, "Database tidak ditemukan")
-		return
-	}
-	if err != nil {
-		web.WriteError(w, http.StatusInternalServerError, "Gagal mengunci database")
-		return
-	}
-
-	targetPool, err := h.manager.Pool(r.Context(), dbID)
-	if err != nil {
-		if errors.Is(err, dbmanager.ErrDatabaseNotFound) {
-			web.WriteError(w, http.StatusNotFound, "Database tidak ditemukan")
+	var revNo int
+	var revStatus string
+	if currentRevID.Valid {
+		err = tx.QueryRow(r.Context(), `
+			SELECT revision_no, status
+			FROM migration_revisions
+			WHERE id = $1
+			FOR UPDATE
+		`, currentRevID.Int64).Scan(&revNo, &revStatus)
+		if err != nil {
+			web.WriteError(w, http.StatusInternalServerError, "Gagal membaca revisi migration")
 			return
 		}
-		if !h.recordFailure(w, r.Context(), platformTx, id, user.ID, err) {
+	}
+	if currentRevID.Valid && revStatus == "draft" {
+		if _, err := tx.Exec(r.Context(), `
+			UPDATE migration_revisions
+			SET sql_up = $2, sql_down = $3, irreversible = $4, irreversible_reason = $5,
+			    mode = $6, batch_table = $7, batch_column = $8, batch_size = $9
+			WHERE id = $1 AND status = 'draft'
+		`,
+			currentRevID.Int64, input.SQLUp, input.SQLDown,
+			input.Irreversible, input.IrreversibleReason, input.Mode,
+			input.BatchTable, input.BatchColumn, input.BatchSize,
+		); err != nil {
+			web.WriteError(w, http.StatusInternalServerError, "Gagal mengubah revisi draft")
 			return
 		}
-		web.WriteError(w, http.StatusBadGateway, "Koneksi ke database target gagal")
-		return
-	}
-	targetTx, err := targetPool.Begin(r.Context())
-	if err != nil {
-		if !h.recordFailure(w, r.Context(), platformTx, id, user.ID, err) {
+		if _, err := tx.Exec(r.Context(), `
+			UPDATE migrations SET title = $2, sql = $3 WHERE id = $1
+		`, id, input.Title, input.SQLUp); err != nil {
+			web.WriteError(w, http.StatusInternalServerError, "Gagal mengubah migration")
 			return
 		}
-		web.WriteError(w, http.StatusBadGateway, "Koneksi ke database target gagal")
-		return
-	}
-	defer targetTx.Rollback(r.Context())
-
-	if _, err := targetTx.Exec(r.Context(), sql, pgx.QueryExecModeSimpleProtocol); err != nil {
-		if !h.recordFailure(w, r.Context(), platformTx, id, user.ID, err) {
+	} else {
+		var hasHistory bool
+		if err := tx.QueryRow(r.Context(), `
+			SELECT EXISTS (SELECT 1 FROM migration_history WHERE migration_id = $1)
+		`, id).Scan(&hasHistory); err != nil {
+			web.WriteError(w, http.StatusInternalServerError, "Gagal memeriksa riwayat migration")
 			return
 		}
-		item, loadErr := h.loadMigration(r.Context(), h.platform, id)
-		if loadErr != nil {
-			web.WriteError(w, http.StatusInternalServerError, "Migration gagal dan statusnya tidak dapat dibaca")
+		if version.Valid || hasHistory {
+			web.WriteError(w, http.StatusBadRequest, "Migration yang pernah dieksekusi bersifat immutable; buat migration baru")
 			return
 		}
-		web.WriteJSON(w, http.StatusOK, item)
-		return
-	}
-	if err := targetTx.Commit(r.Context()); err != nil {
-		if !h.recordFailure(w, r.Context(), platformTx, id, user.ID, err) {
+		var newRevID int64
+		err = tx.QueryRow(r.Context(), `
+			INSERT INTO migration_revisions (
+				migration_id, revision_no, status, sql_up, sql_down,
+				irreversible, irreversible_reason, mode,
+				batch_table, batch_column, batch_size, created_by
+			) VALUES ($1, $2, 'draft', $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			RETURNING id
+		`,
+			id, revNo+1, input.SQLUp, input.SQLDown,
+			input.Irreversible, input.IrreversibleReason, input.Mode,
+			input.BatchTable, input.BatchColumn, input.BatchSize, user.ID,
+		).Scan(&newRevID)
+		if err != nil {
+			web.WriteError(w, http.StatusInternalServerError, "Gagal membuat revisi baru")
 			return
 		}
-		web.WriteError(w, http.StatusBadGateway, "Commit migration pada database target gagal")
+		if _, err := tx.Exec(r.Context(), `
+			UPDATE migrations SET title = $2, sql = $3, current_revision_id = $4 WHERE id = $1
+		`, id, input.Title, input.SQLUp, newRevID); err != nil {
+			web.WriteError(w, http.StatusInternalServerError, "Gagal menautkan revisi baru")
+			return
+		}
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		web.WriteError(w, http.StatusInternalServerError, "Gagal menyimpan perubahan migration")
 		return
 	}
-
-	var version int
-	err = platformTx.QueryRow(r.Context(), `
-		SELECT COALESCE(MAX(version), 0) + 1
-		FROM migrations
-		WHERE db_connection_id = $1 AND status = 'success'`, dbID,
-	).Scan(&version)
+	detail, err := h.loadMigrationDetail(r.Context(), h.platform, id)
 	if err != nil {
-		web.WriteError(w, http.StatusInternalServerError, "Migration berhasil pada database target tetapi gagal memberi versi")
+		web.WriteError(w, http.StatusInternalServerError, "Migration berhasil diubah tetapi gagal dibaca")
 		return
 	}
-	tag, err := platformTx.Exec(r.Context(), `
-		UPDATE migrations
-		SET version = $2, status = 'success', executed_by = $3,
-		    executed_at = now(), error_message = NULL
-		WHERE id = $1 AND status = 'draft'`, id, version, user.ID)
-	if err != nil {
-		web.WriteError(w, http.StatusInternalServerError, "Migration berhasil pada database target tetapi gagal mencatat riwayat")
-		return
-	}
-	if tag.RowsAffected() != 1 {
-		web.WriteError(w, http.StatusInternalServerError, "Migration berhasil pada database target tetapi status riwayat tidak berubah")
-		return
-	}
-	if err := platformTx.Commit(r.Context()); err != nil {
-		web.WriteError(w, http.StatusInternalServerError, "Migration berhasil pada database target tetapi gagal mencatat riwayat")
-		return
-	}
-
-	item, err := h.loadMigration(r.Context(), h.platform, id)
-	if err != nil {
-		web.WriteError(w, http.StatusInternalServerError, "Migration berhasil tetapi gagal membaca riwayat")
-		return
-	}
-	web.WriteJSON(w, http.StatusOK, item)
-}
-
-func (h *Handler) recordFailure(w http.ResponseWriter, ctx context.Context, tx pgx.Tx, id, userID int64, cause error) bool {
-	message := cause.Error()
-	if len(message) > maxStoredErrorBytes {
-		message = message[:maxStoredErrorBytes]
-	}
-	_, err := tx.Exec(ctx, `
-		UPDATE migrations
-		SET status = 'failed', version = NULL, executed_by = $2,
-		    executed_at = now(), error_message = $3
-		WHERE id = $1 AND status = 'draft'`, id, userID, message)
-	if err != nil {
-		web.WriteError(w, http.StatusInternalServerError, "Migration gagal dan statusnya tidak dapat dicatat")
-		return false
-	}
-	if err := tx.Commit(ctx); err != nil {
-		web.WriteError(w, http.StatusInternalServerError, "Migration gagal dan statusnya tidak dapat dicatat")
-		return false
-	}
-	return true
-}
-
-func (h *Handler) loadMigration(ctx context.Context, queryer interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
-}, id int64) (Migration, error) {
-	item, err := scanMigration(queryer.QueryRow(ctx, migrationSelect+` WHERE m.id = $1`, id))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Migration{}, errMigrationNotFound
-	}
-	return item, err
-}
-
-func scanMigration(row rowScanner) (Migration, error) {
-	var item Migration
-	var version pgtype.Int4
-	var executedBy pgtype.Text
-	var executedAt pgtype.Timestamptz
-	var errorMessage pgtype.Text
-	if err := row.Scan(
-		&item.ID, &item.DatabaseID, &version, &item.Title, &item.SQL, &item.Status,
-		&item.CreatedBy, &executedBy, &item.CreatedAt, &executedAt, &errorMessage,
-	); err != nil {
-		return Migration{}, err
-	}
-	if version.Valid {
-		v := int(version.Int32)
-		item.Version = &v
-	}
-	if executedBy.Valid {
-		item.ExecutedBy = &executedBy.String
-	}
-	if executedAt.Valid {
-		t := executedAt.Time
-		item.ExecutedAt = &t
-	}
-	if errorMessage.Valid {
-		item.ErrorMessage = &errorMessage.String
-	}
-	return item, nil
-}
-
-func (h *Handler) migrationDatabaseID(ctx context.Context, id int64) (int64, error) {
-	var dbID int64
-	err := h.platform.QueryRow(ctx, `SELECT db_connection_id FROM migrations WHERE id = $1`, id).Scan(&dbID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, errMigrationNotFound
-	}
-	return dbID, err
-}
-
-func (h *Handler) migrationLocation(ctx context.Context, id int64) (int64, string, error) {
-	var dbID int64
-	var status string
-	err := h.platform.QueryRow(ctx, `SELECT db_connection_id, status FROM migrations WHERE id = $1`, id).Scan(&dbID, &status)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, "", errMigrationNotFound
-	}
-	return dbID, status, err
-}
-
-func (h *Handler) databaseExists(w http.ResponseWriter, ctx context.Context, id int64) bool {
-	var exists bool
-	if err := h.platform.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM db_connections WHERE id = $1)`, id).Scan(&exists); err != nil {
-		web.WriteError(w, http.StatusInternalServerError, "Gagal memeriksa database")
-		return false
-	}
-	if !exists {
-		web.WriteError(w, http.StatusNotFound, "Database tidak ditemukan")
-		return false
-	}
-	return true
+	web.WriteJSON(w, http.StatusOK, detail)
 }
 
 func (h *Handler) requireAccess(w http.ResponseWriter, r *http.Request, dbID int64, level authz.Level) (*auth.User, bool) {
@@ -548,13 +462,47 @@ func decodeMigrationInput(w http.ResponseWriter, r *http.Request) (migrationInpu
 		return migrationInput{}, false
 	}
 	input.Title = strings.TrimSpace(input.Title)
-	if input.Title == "" || strings.TrimSpace(input.SQL) == "" {
+	if input.Title == "" || strings.TrimSpace(input.SQLUp) == "" {
 		web.WriteError(w, http.StatusBadRequest, "Title dan SQL wajib diisi")
 		return migrationInput{}, false
 	}
 	if utf8.RuneCountInString(input.Title) > 200 {
 		web.WriteError(w, http.StatusBadRequest, "Title maksimal 200 karakter")
 		return migrationInput{}, false
+	}
+	input.Mode = strings.TrimSpace(input.Mode)
+	if input.Mode == "" {
+		input.Mode = "normal"
+	}
+	if input.Mode != "normal" && input.Mode != "batch" {
+		web.WriteError(w, http.StatusBadRequest, "Mode migration harus 'normal' atau 'batch'")
+		return migrationInput{}, false
+	}
+	empty := ""
+	if input.Irreversible {
+		if input.IrreversibleReason == nil {
+			input.IrreversibleReason = &empty
+		}
+	} else {
+		if input.SQLDown == nil {
+			input.SQLDown = &empty
+		}
+	}
+	if input.Mode == "normal" {
+		input.BatchTable = nil
+		input.BatchColumn = nil
+		input.BatchSize = nil
+	} else {
+		if input.BatchTable == nil || strings.TrimSpace(*input.BatchTable) == "" ||
+			input.BatchColumn == nil || strings.TrimSpace(*input.BatchColumn) == "" ||
+			input.BatchSize == nil || *input.BatchSize < 1 || *input.BatchSize > maxBatchSize {
+			web.WriteError(w, http.StatusBadRequest, "Mode batch wajib menyertakan batchTable, batchColumn, dan batchSize (1-100000)")
+			return migrationInput{}, false
+		}
+		t := strings.TrimSpace(*input.BatchTable)
+		c := strings.TrimSpace(*input.BatchColumn)
+		input.BatchTable = &t
+		input.BatchColumn = &c
 	}
 	return input, true
 }

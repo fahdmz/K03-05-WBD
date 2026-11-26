@@ -14,6 +14,9 @@ export default function Layout() {
                     <Link to="/" className="text-sm text-slate-600 hover:text-slate-900">
                         Databases
                     </Link>
+                    <Link to="/reviews" className="text-sm text-slate-600 hover:text-slate-900">
+                        Reviews
+                    </Link>
                     {user?.isAdmin && (
                         <Link to="/admin" className="text-sm text-slate-600 hover:text-slate-900">
                             Admin
