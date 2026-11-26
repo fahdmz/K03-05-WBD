@@ -9,6 +9,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -19,17 +20,28 @@ import (
 const tracerName = "github.com/fahdmz/K03-05-WBD"
 
 func setupTracing(service string) (func(context.Context) error, error) {
-	exporter, err := stdouttrace.New(stdouttrace.WithWriter(os.Stderr))
+	exporter, err := traceExporter()
 	if err != nil {
 		return nil, err
 	}
 	provider := sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(exporter, sdktrace.WithBatchTimeout(time.Second)),
-		sdktrace.WithResource(resource.NewSchemaless(attribute.String("service.name", service))),
+		sdktrace.WithResource(serviceResource(service)),
 	)
 	otel.SetTracerProvider(provider)
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 	return provider.Shutdown, nil
+}
+
+func traceExporter() (sdktrace.SpanExporter, error) {
+	if otlpEnabled() {
+		return otlptracehttp.New(context.Background())
+	}
+	return stdouttrace.New(stdouttrace.WithWriter(os.Stderr))
+}
+
+func serviceResource(service string) *resource.Resource {
+	return resource.NewSchemaless(attribute.String("service.name", service))
 }
 
 func Tracer() trace.Tracer {

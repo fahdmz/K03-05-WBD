@@ -32,6 +32,17 @@ services:
     tmpfs:
       - /var/lib/postgresql/data
 
+  observability:
+    image: grafana/otel-lgtm:0.41.1
+    ports:
+      - "3000:3000"
+      - "4317:4317"
+      - "4318:4318"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./observability/otelcol-config.yaml:/otel-lgtm/otelcol-config.yaml:ro
+
 volumes:
   platform-data:
   target-data:
