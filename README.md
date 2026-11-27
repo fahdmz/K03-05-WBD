@@ -440,7 +440,7 @@ Ringkasan cakupan per paket. Hampir setiap paket menguji jalur berhasil, jalur g
 | `internal/auth` | Login berhasil dan gagal, cookie aman, `/me` butuh login, CSRF dan logout, idle timeout, absolute expiration, rotasi dan grace period, revoke dan rotate session, user nonaktif ditolak, session ikut transaksi. |
 | `internal/authz` | Akses efektif dari beberapa group, `Require` menolak level kurang, level minimum tidak valid, integrasi dengan database. |
 | `internal/admin` | CRUD user, group, koneksi, anggota, akses, dan leader, perubahan session saat privilege berubah, rollback bila perubahan session gagal, endpoint admin menolak non-admin, validasi input sebelum menyentuh database, enkripsi password koneksi. |
-| `internal/dbmanager` | Dekripsi password dan penolakan data terpotong, quoting kredensial, validasi key, error koneksi tidak membocorkan password, pagination, viewer menolak akses dan kegagalan target, schema `_platform` disembunyikan. |
+| `internal/dbmanager` | Dekripsi password dan penolakan data terpotong, quoting kredensial, validasi key, error koneksi tidak membocorkan password, pagination, viewer menolak akses dan kegagalan target, schema `_platform` disembunyikan, daftar database tetap jalan dengan pool satu koneksi. |
 | `internal/migration` | Decode input, validasi struktur, alur migration terintegrasi, execution plan (penolakan akses, error, integrasi). |
 | `internal/workflow` | Unit: request tanpa login ditolak 401, ID path tidak valid 400, reject tanpa komentar 400, filter status tidak valid 400, komentar lebih dari 2000 karakter 400. Integrasi: anggota bukan leader dan leader group tanpa akses ditolak 403, run sebelum approved ditolak 400, daftar review leader, approval satu dari dua group tetap `pending_review` lalu dua dari dua menjadi `approved`, group baru diberi akses membuat run ditolak 409 sampai leadernya menyetujui, user View ditolak 403 saat run, run berhasil 202 dengan `jobId` dan `executionId`, run kedua ditolak 409, revalidasi lolos lalu gagal dengan menyebut group yang kehilangan leader, satu reject membuat status `rejected` dan run ditolak 400, serta rantai resume bertingkat lolos revalidasi. |
 | `internal/history` | Hide rollback (contoh E1 sampai E5 dan attempt gagal tetap tampil), alur rollback dan forward, aturan posisi, attempt gagal tercatat, history immutable, endpoint rollback dan job termasuk penolakan akses, aksi efektif job. |
@@ -558,6 +558,96 @@ Query Loki `{service_name=~"server|worker"} | trace_id="0dcbb027a28af6f3bd9d32db
 `span_id` di log sama dengan span di Tempo: log `http.request` milik span HTTP server, dan log worker milik span `worker.job`, yang parent-nya adalah span HTTP itu. Metrik worker yang sama-sama berasal dari job ini: `worker_jobs_finished_total{status="success",action="apply",mode="batch"}` bernilai 1, `worker_migration_duration_seconds_sum` dengan label yang sama bernilai 22,96 detik (sesuai durasi span `worker.job`), `worker_batches_committed_total{direction="up"}` bernilai 3000 (sesuai jumlah span `batch`), dan `worker_rows_committed_total{direction="up"}` bernilai 3000000. Metrik tidak membawa ID job atau trace, jadi hubungannya ditarik lewat label `action`, `mode`, dan `direction` serta waktu kejadian, lalu detailnya dibuka lewat `trace_id` di log.
 
 Label metrik dashboard hanya `job`, `status`, `action`, `mode`, `direction`, `result`, dan `state`, karena semuanya punya himpunan nilai kecil dan tetap. Alasannya sama dengan yang dijelaskan di bagian Metrik: ID dan teks bebas sebagai label membuat jumlah time series tumbuh tanpa batas dan bisa membocorkan data. Detail per eksekusi dicari lewat log dan trace, yang terhubung dengan `trace_id`.
+
+### Stress test (k6)
+
+Script `loadtest/stress.js` menguji endpoint baca yang paling sering dipanggil frontend: `GET /api/databases`, `GET /api/databases/{id}/history`, `GET /api/databases/{id}/jobs`, dan `GET /api/jobs/{id}`. Script tidak membuat migration, change request, atau job. Satu-satunya request tulis adalah login di `setup()`.
+
+`setup()` login 10 kali (diatur lewat `SESSIONS`). Setiap login memakai cookie jar kosong, karena `POST /api/auth/login` yang membawa cookie lama akan me-logout session itu. Setelah itu `setup()` mengambil database pertama yang bisa diakses user dan daftar ID job-nya. Setiap VU memakai session secara round robin, memanggil keempat endpoint berurutan, lalu `sleep(0.5)`. Rotasi session baru terjadi setelah 15 menit, sehingga cookie dari `setup()` berlaku sampai test selesai.
+
+Cara menjalankan (k6 lewat Docker, tanpa instalasi). Server dan worker harus jalan di host:
+
+```
+docker compose up -d
+go run ./cmd/server
+go run ./cmd/worker
+mkdir -p loadtest/results
+docker run --rm -v "$PWD/loadtest:/work/loadtest" -w /work \
+  -e BASE_URL=http://host.docker.internal:8080 \
+  grafana/k6:2.4.0 run --quiet loadtest/stress.js
+```
+
+Ringkasan lengkap ditulis `handleSummary` ke `loadtest/results/summary.json`, dan tabel per fase dicetak ke stdout. Variabel yang bisa diatur dengan `-e`: `SESSIONS` (10), `NORMAL_VUS` (20), `PEAK_VUS` (300), `LOW_VUS` (10), `THINK_TIME` (0.5), `K6_USERNAME`/`K6_PASSWORD` (`admin`/`admin123`), `DB_ID`, dan `SUMMARY_PATH`. User harus punya akses View ke minimal satu database yang sudah punya job.
+
+Karena k6 berjalan di container dan menembak server di host lewat `host.docker.internal`, setiap request melewati jaringan virtual Docker Desktop. Latensi yang terukur sedikit lebih tinggi daripada request langsung ke `localhost`.
+
+Tahapan beban (executor `ramping-vus`, total 6 menit 30 detik). Fase dihitung dari waktu sejak scenario mulai dan dipasang sebagai tag `phase` pada setiap request:
+
+| Fase | Waktu | VU |
+|---|---|---|
+| `normal` | 0:00 sampai 1:30 | naik 0 ke 20 dalam 30 detik, lalu tahan 1 menit |
+| `ramp_up` | 1:30 sampai 2:30 | 20 ke 300 |
+| `peak` | 2:30 sampai 4:30 | tahan 300 |
+| `ramp_down` | 4:30 sampai 5:00 | 300 ke 10 |
+| `recovery` | 5:00 sampai 6:30 | tahan 10 |
+
+Threshold:
+
+| Threshold | Alasan |
+|---|---|
+| `http_req_duration p(95)<500` | Endpoint baca di mesin lokal seharusnya selesai dalam belasan milidetik. Batas 500 ms memberi ruang untuk antrean saat puncak tanpa menyembunyikan degradasi besar. |
+| `http_req_failed rate<0.01` dan `checks rate>0.99` | Endpoint baca tidak boleh gagal. Check memeriksa status 200 per endpoint. |
+| `p(95)<200` pada fase `normal` dan `recovery` | Memastikan sistem sehat sebelum beban puncak dan kembali sehat setelah beban turun. |
+
+#### Hasil sebelum dan sesudah perbaikan
+
+Dijalankan di MacBook Pro Apple Silicon (10 CPU), PostgreSQL 16 di Docker Desktop, dan k6 v2.4.0, dengan 10 session. Server dan worker berjalan tanpa `OTEL_EXPORTER_OTLP_ENDPOINT` dengan log stdout diarahkan ke file. Pool platform server memakai default pgxpool, yaitu `max(4, jumlah CPU)` = 10 koneksi. Kolom RPS adalah jumlah request dibagi durasi nominal fase. Hasil sebelum perbaikan ada di `loadtest/results/summary-before-fix.json` dan `pool-metrics-before-fix.log`, dan hasil sesudahnya di `summary.json` dan `pool-metrics.log`. Sampel pool diambil dari `/metrics` server setiap 5 detik.
+
+Sebelum perbaikan (k6 exit code 99, threshold `http_req_duration`, `http_req_failed`, dan `checks` gagal):
+
+| Fase | p50 (ms) | p95 (ms) | p99 (ms) | Error rate | Request | RPS |
+|---|---|---|---|---|---|---|
+| normal | 4,2 | 10,2 | 43.619,8 | 0,58% | 4.844 | 53,8 |
+| ramp_up | 133,5 | 60.000,0 | 60.002,1 | 23,48% | 1.116 | 18,6 |
+| peak | 104,7 | 60.008,4 | 60.010,8 | 23,36% | 1.284 | 10,7 |
+| ramp_down | 15,6 | 60.000,8 | 60.001,0 | 19,23% | 52 | 1,7 |
+| recovery | 6,6 | 12,8 | 17,3 | 0,00% | 4.480 | 49,8 |
+| Total | 6,3 | 59.995,2 | 60.007,0 | 5,09% | 11.788 | 30,2 |
+
+Sesudah perbaikan (k6 exit code 0, semua threshold lolos):
+
+| Fase | p50 (ms) | p95 (ms) | p99 (ms) | Error rate | Request | RPS |
+|---|---|---|---|---|---|---|
+| normal | 6,8 | 17,3 | 21,7 | 0,00% | 11.180 | 124,2 |
+| ramp_up | 2,7 | 12,5 | 19,8 | 0,00% | 74.412 | 1.240,2 |
+| peak | 4,1 | 34,2 | 53,2 | 0,00% | 268.284 | 2.235,7 |
+| ramp_down | 2,6 | 20,7 | 32,6 | 0,00% | 35.748 | 1.191,6 |
+| recovery | 5,6 | 10,3 | 17,8 | 0,00% | 6.848 | 76,1 |
+| Total | 3,6 | 29,5 | 48,0 | 0,00% | 396.484 | 1.013,9 |
+
+Pool server per fase. Kolom acquire wait adalah pertambahan `server_db_pool_acquire_wait_seconds_total` selama fase, yaitu total waktu tunggu semua request yang antre, sehingga nilainya bisa melebihi durasi fase:
+
+| Fase | Sampel `active=10` (sebelum / sesudah) | Rata-rata active (sebelum / sesudah) | Acquire wait (sebelum / sesudah) |
+|---|---|---|---|
+| normal | 8 dari 18 / 2 dari 18 | 5,1 / 1,2 | 0,8 s / 24,1 s |
+| ramp_up | 12 dari 12 / 1 dari 12 | 10,0 / 2,4 | 1.300,5 s / 86,2 s |
+| peak | 24 dari 24 / 7 dari 24 | 10,0 / 5,7 | 25.035,2 s / 1.587,5 s |
+| ramp_down | 6 dari 6 / 0 dari 6 | 10,0 / 0,7 | 0,0 s / 88,3 s |
+| recovery | 6 dari 18 / 1 dari 18 | 3,3 / 0,6 | 3.797,9 s / 0,0 s |
+
+#### Analisis
+
+**Deadlock pool ditemukan oleh k6.** Pada run pertama, sistem macet sudah di fase normal dengan 20 VU: p99 fase normal 43,6 detik, pool penuh (`active=10, idle=0`) di semua sampel sejak ramp_up sampai ramp_down, sekitar 23% request di fase ramp_up dan peak gagal karena timeout 60 detik k6, dan RPS justru turun ke 10,7 saat VU naik ke 300. Log server mencatat 872 request `/api/databases` berstatus 500 setelah sekitar 60 detik, yaitu saat k6 memutus koneksi dan context request dibatalkan. Angka ini lebih besar daripada 600 kegagalan yang dicatat k6, kemungkinan karena request yang terputus saat VU dihentikan ketika ramp-down tidak masuk metrik k6.
+
+**Penyebab.** `listDatabases` (`internal/dbmanager/viewer.go`) memanggil `EffectiveLevel` di dalam loop `rows.Next()`, sehingga satu request memegang koneksi untuk `rows` sambil meminta koneksi kedua dari pool yang sama. Begitu ada 10 request `/api/databases` bersamaan, kesepuluh koneksi dipegang `rows` dan semuanya menunggu koneksi ke-11 yang tidak pernah tersedia. Endpoint lain ikut antre di belakangnya.
+
+**Perbaikan.** Semua baris `db_connections` kini dibaca ke slice dan `rows` ditutup sebelum `EffectiveLevel` dipanggil, sehingga satu request hanya memegang satu koneksi pada satu waktu. Format response tidak berubah. Regression test `TestListDatabasesWithSingleConnectionPool` memakai pool `MaxConns = 1` dengan context 2 detik: test ini gagal di kode lama (500 setelah 2,19 detik) dan lolos di kode baru. Pola yang sama tidak ditemukan di loop `rows.Next()` lain.
+
+**Setelah perbaikan.** Tidak ada request gagal dari 396.484 request, p95 tertinggi 34,2 ms di fase peak, request paling lambat 272,2 ms (`http_req_duration` max dari k6), dan RPS puncak 2.235,7. Bottleneck berikutnya yang terlihat adalah antrean di pool platform yang hanya berisi 10 koneksi. Di fase peak, pool penuh di 7 dari 24 sampel, total acquire wait bertambah 1.587,5 detik dalam 120 detik (rata-rata sekitar 13 request menunggu koneksi), dan p95 naik dari 12,5 ms di ramp_up menjadi 34,2 ms. Selain itu `/api/databases` masih menjalankan satu query akses per database (N+1), sehingga biayanya akan tumbuh seiring jumlah database. Beban 300 VU dengan think time 0,5 detik membatasi RPS di sekitar 2.300, sehingga titik jenuh server yang sebenarnya belum tercapai di test ini.
+
+**Pemulihan.** Setelah beban turun ke 10 VU, fase recovery tanpa error dengan p95 10,3 ms, dan acquire wait tidak bertambah. Sebelum perbaikan sistem juga pulih di fase recovery (p95 12,8 ms), tetapi hanya karena k6 memutus request yang tertahan.
+
+**Catatan, tidak diperbaiki:** `http.Server` di `cmd/server/main.go` tidak memasang `ReadTimeout`, `WriteTimeout`, maupun batas waktu per request. Context query baru dibatalkan ketika koneksi klien putus, sehingga request yang tertahan di sisi server bisa menunggu tanpa batas selama klien tetap terhubung.
 
 ## Format error
 
