@@ -127,6 +127,7 @@ function EditorDialog({
   const formRef = useRef<HTMLFormElement>(null)
   const operationPending = useRef(false)
   const [busy, setBusy] = useState(false)
+  const [testing, setTesting] = useState(false)
   const [error, setError] = useState('')
   const [testResult, setTestResult] = useState('')
 
@@ -164,6 +165,7 @@ function EditorDialog({
 
     operationPending.current = true
     setBusy(true)
+    setTesting(true)
     setError('')
     setTestResult('')
 
@@ -179,6 +181,7 @@ function EditorDialog({
     } finally {
       operationPending.current = false
       setBusy(false)
+      setTesting(false)
     }
   }
 
@@ -231,20 +234,26 @@ function EditorDialog({
           break
         }
 
-        case 'group':
+        case 'group': {
+          const body: Record<string, unknown> = {
+            name: String(values.get('name') ?? '').trim(),
+            description: String(values.get('description') ?? ''),
+          }
+          if (editor.row) {
+            const rawLeader = String(values.get('leaderUserId') ?? '').trim()
+            body.leaderUserId = rawLeader === '' ? null : Number(rawLeader)
+          }
           await api(
             editor.row
               ? `/admin/groups/${editor.row.id}`
               : '/admin/groups',
             {
               method: editor.row ? 'PATCH' : 'POST',
-              body: {
-                name: String(values.get('name') ?? '').trim(),
-                description: String(values.get('description') ?? ''),
-              },
+              body,
             },
           )
           break
+        }
 
         case 'members':
           await api(`/admin/groups/${editor.row.id}/members`, {
@@ -415,6 +424,30 @@ function EditorDialog({
                     maxLength={2000}
                   />
                 </Field>
+                {editor.row && (
+                  <>
+                    <Field label="Leader group">
+                      <select
+                        name="leaderUserId"
+                        defaultValue={editor.row.leaderUserId ?? ''}
+                      >
+                        <option value="">Belum ditetapkan</option>
+                        {data.users
+                          .filter((user) => editor.row?.memberIds.includes(user.id))
+                          .map((user) => (
+                            <option key={user.id} value={user.id}>
+                              {user.username}{user.isActive ? '' : ' (Nonaktif)'}
+                            </option>
+                          ))}
+                      </select>
+                    </Field>
+                    <p className="admin-help">
+                      {editor.row.memberIds.length === 0
+                        ? 'Tambahkan anggota terlebih dahulu lewat tombol Anggota sebelum menetapkan leader.'
+                        : 'Leader harus anggota group ini dan wajib menyetujui perubahan database yang diakses group.'}
+                    </p>
+                  </>
+                )}
               </>
             )}
 
@@ -555,7 +588,7 @@ function EditorDialog({
         <footer className="admin-dialog-footer">
           {editor.kind === 'database' && (
             <button type="button" onClick={testConnection} disabled={busy}>
-              Test connection
+              {testing ? 'Menguji…' : 'Test connection'}
             </button>
           )}
           <button type="button" onClick={onClose} disabled={busy}>Batal</button>
@@ -682,7 +715,7 @@ export default function AdminPage({
             disabled={loading}
             onClick={() => setRevision((value) => value + 1)}
           >
-            Muat ulang
+            {loading ? 'Memuat…' : 'Muat ulang'}
           </button>
           <button
             type="button"
@@ -743,30 +776,43 @@ export default function AdminPage({
           )}
 
           {section === 'groups' && (
-            <Table headings={['Group', 'Anggota', 'Akses database', 'Tindakan']} empty={groups.length === 0}>
-              {groups.map((group) => (
-                <tr key={group.id}>
-                  <td>
-                    <strong>{group.name}</strong>
-                    <small className="admin-muted">{group.description || 'Tanpa deskripsi'}</small>
-                  </td>
-                  <td>{group.memberIds.length} user</td>
-                  <td>{group.access.length} database</td>
-                  <td>
-                    <div className="admin-actions">
-                      <button onClick={() => setEditor({ kind: 'group', row: group })}>Edit</button>
-                      <button onClick={() => setEditor({ kind: 'members', row: group })}>Anggota</button>
-                      <button onClick={() => setEditor({ kind: 'access', row: group })}>Akses</button>
-                      <button
-                        className="danger-outline"
-                        onClick={() => remove('groups', group.id, group.name)}
-                      >
-                        Hapus
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
+            <Table headings={['Group', 'Leader', 'Anggota', 'Akses database', 'Tindakan']} empty={groups.length === 0}>
+              {groups.map((group) => {
+                const leader = data.users.find((u) => u.id === group.leaderUserId)
+                return (
+                  <tr key={group.id}>
+                    <td>
+                      <strong>{group.name}</strong>
+                      <small className="admin-muted">{group.description || 'Tanpa deskripsi'}</small>
+                    </td>
+                    <td>
+                      {leader ? (
+                        <>
+                          <strong>{leader.username}</strong>
+                          {!leader.isActive && <small className="admin-muted">Nonaktif</small>}
+                        </>
+                      ) : (
+                        <span className="admin-muted">Belum ditetapkan</span>
+                      )}
+                    </td>
+                    <td>{group.memberIds.length} user</td>
+                    <td>{group.access.length} database</td>
+                    <td>
+                      <div className="admin-actions">
+                        <button onClick={() => setEditor({ kind: 'group', row: group })}>Edit</button>
+                        <button onClick={() => setEditor({ kind: 'members', row: group })}>Anggota</button>
+                        <button onClick={() => setEditor({ kind: 'access', row: group })}>Akses</button>
+                        <button
+                          className="danger-outline"
+                          onClick={() => remove('groups', group.id, group.name)}
+                        >
+                          Hapus
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                )
+              })}
             </Table>
           )}
 

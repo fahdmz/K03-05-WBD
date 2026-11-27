@@ -2,6 +2,8 @@ package dbmanager
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -281,4 +283,171 @@ func TestViewerIntegration(t *testing.T) {
 			t.Fatalf("rows = %#v, want page 2 with one row from total 2", rows)
 		}
 	})
+}
+
+// Regression: listDatabases dulu memanggil EffectiveLevel selagi rows masih
+// terbuka, sehingga satu request butuh dua koneksi dari pool yang sama. Dengan
+// MaxConns 1, request itu menunggu koneksinya sendiri sampai context habis.
+func TestListDatabasesWithSingleConnectionPool(t *testing.T) {
+	platformURL := envOr("VIEWER_TEST_DATABASE_URL", testDatabaseURL())
+	seed := setupPlatformDB(t, platformURL)
+	ctx := context.Background()
+
+	var userID, groupID, dbID int64
+	if err := seed.QueryRow(ctx, `
+		INSERT INTO users (username, password_hash) VALUES ('single_pool_user', 'test')
+		RETURNING id`).Scan(&userID); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if err := seed.QueryRow(ctx, `
+		INSERT INTO groups (name) VALUES ('single_pool_group') RETURNING id`).Scan(&groupID); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	if err := seed.QueryRow(ctx, `
+		INSERT INTO db_connections (name, host, port, dbname, username, password_encrypted)
+		VALUES ('single_pool_db', 'test', 5432, 'test', 'test', $1)
+		RETURNING id`, []byte{1}).Scan(&dbID); err != nil {
+		t.Fatalf("create database record: %v", err)
+	}
+	if _, err := seed.Exec(ctx, `
+		INSERT INTO group_members (group_id, user_id) VALUES ($1, $2)`, groupID, userID); err != nil {
+		t.Fatalf("add member: %v", err)
+	}
+	if _, err := seed.Exec(ctx, `
+		INSERT INTO group_db_access (group_id, db_connection_id, level) VALUES ($1, $2, 'view')`,
+		groupID, dbID); err != nil {
+		t.Fatalf("grant access: %v", err)
+	}
+
+	cfg, err := pgxpool.ParseConfig(platformURL)
+	if err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	cfg.ConnConfig.RuntimeParams["search_path"] = testSchema
+	cfg.MaxConns = 1
+	pool := connectOrSkip(t, cfg)
+	t.Cleanup(pool.Close)
+
+	viewer := NewViewer(pool, Stub{}, authz.NewPostgresAuthorizer(pool))
+	mux := http.NewServeMux()
+	viewer.Register(mux)
+
+	request := viewerTestRequest(http.MethodGet, "/api/databases", userID)
+	reqCtx, cancel := context.WithTimeout(request.Context(), 2*time.Second)
+	defer cancel()
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request.WithContext(reqCtx))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (pool MaxConns 1 kehabisan koneksi?); body=%s",
+			response.Code, http.StatusOK, response.Body.String())
+	}
+	var databases []databaseSummary
+	if err := json.Unmarshal(response.Body.Bytes(), &databases); err != nil {
+		t.Fatalf("decode databases response: %v", err)
+	}
+	if len(databases) != 1 || databases[0].ID != dbID || databases[0].Level != "view" {
+		t.Fatalf("databases = %#v, want database %d with view access", databases, dbID)
+	}
+}
+
+// tempTargetDB bikin database target acak (di-drop pas cleanup) dan balikin pool-nya.
+func tempTargetDB(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	base := testDatabaseURL()
+	adminCfg, err := pgxpool.ParseConfig(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := connectOrSkip(t, adminCfg)
+
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		t.Fatal(err)
+	}
+	name := "viewer_" + hex.EncodeToString(b)
+	ident := pgx.Identifier{name}.Sanitize()
+	if _, err := admin.Exec(context.Background(), "CREATE DATABASE "+ident); err != nil {
+		admin.Close()
+		t.Fatalf("create database: %v", err)
+	}
+	t.Cleanup(func() {
+		defer admin.Close()
+		if _, err := admin.Exec(context.Background(), "DROP DATABASE IF EXISTS "+ident+" WITH (FORCE)"); err != nil {
+			t.Errorf("drop database %s: %v", name, err)
+		}
+	})
+
+	cfg, err := pgxpool.ParseConfig(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Database = name
+	pool := connectOrSkip(t, cfg)
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+func TestViewerHidesPlatformSchemaIntegration(t *testing.T) {
+	target := tempTargetDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if _, err := target.Exec(ctx, `
+		CREATE SCHEMA _platform;
+		CREATE TABLE _platform.executions (execution_id UUID PRIMARY KEY);
+		CREATE SCHEMA shop;
+		CREATE TABLE shop.executions (id INT PRIMARY KEY);
+		INSERT INTO shop.executions VALUES (1)`); err != nil {
+		t.Fatalf("prepare target: %v", err)
+	}
+
+	viewer := NewViewer(nil, viewerTestManager{pool: target}, viewerTestAuthorizer{})
+	mux := http.NewServeMux()
+	viewer.Register(mux)
+	get := func(path string) *httptest.ResponseRecorder {
+		res := httptest.NewRecorder()
+		mux.ServeHTTP(res, viewerTestRequest(http.MethodGet, path, 7))
+		return res
+	}
+
+	res := get("/api/databases/1/schemas")
+	if res.Code != http.StatusOK {
+		t.Fatalf("schemas status = %d; body=%s", res.Code, res.Body.String())
+	}
+	var schemas []map[string]string
+	if err := json.Unmarshal(res.Body.Bytes(), &schemas); err != nil {
+		t.Fatal(err)
+	}
+	var hasShop bool
+	for _, s := range schemas {
+		if s["name"] == "_platform" {
+			t.Fatalf("schemas = %#v, _platform harus disembunyikan", schemas)
+		}
+		hasShop = hasShop || s["name"] == "shop"
+	}
+	if !hasShop {
+		t.Fatalf("schemas = %#v, want shop", schemas)
+	}
+
+	for _, path := range []string{
+		"/api/databases/1/schemas/_platform/tables",
+		"/api/databases/1/schemas/_platform/tables/executions",
+		"/api/databases/1/schemas/_platform/tables/executions/rows",
+	} {
+		if res := get(path); res.Code != http.StatusNotFound {
+			t.Fatalf("%s: status = %d, want 404; body=%s", path, res.Code, res.Body.String())
+		}
+	}
+
+	// tabel dengan nama sama di schema biasa tetap kebaca
+	for _, path := range []string{
+		"/api/databases/1/schemas/shop/tables",
+		"/api/databases/1/schemas/shop/tables/executions",
+		"/api/databases/1/schemas/shop/tables/executions/rows",
+	} {
+		if res := get(path); res.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200; body=%s", path, res.Code, res.Body.String())
+		}
+	}
 }

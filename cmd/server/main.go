@@ -2,27 +2,40 @@ package main
 
 import (
 	"context"
-	"log"
+	"errors"
+	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/fahdmz/K03-05-WBD/internal/admin"
 	"github.com/fahdmz/K03-05-WBD/internal/auth"
 	"github.com/fahdmz/K03-05-WBD/internal/authz"
 	"github.com/fahdmz/K03-05-WBD/internal/dbmanager"
+	"github.com/fahdmz/K03-05-WBD/internal/history"
 	"github.com/fahdmz/K03-05-WBD/internal/migration"
+	"github.com/fahdmz/K03-05-WBD/internal/obs"
 	"github.com/fahdmz/K03-05-WBD/internal/store"
+	"github.com/fahdmz/K03-05-WBD/internal/workflow"
 	"github.com/jackc/pgx/v5"
 	"github.com/joho/godotenv"
 )
 
 func main() {
 	godotenv.Load()
-	ctx := context.Background()
+	shutdown, err := obs.Setup("server")
+	if err != nil {
+		fatal("obs.setup_failed", err)
+	}
+	defer shutdown(context.Background())
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	db, err := store.Connect(ctx, os.Getenv("DATABASE_URL"))
 	if err != nil {
-		log.Fatalf("connect db: %v", err)
+		fatal("server.db_connect_failed", err)
 	}
 	defer db.Close()
 
@@ -30,7 +43,7 @@ func main() {
 	username, password := os.Getenv("ADMIN_USERNAME"), os.Getenv("ADMIN_PASSWORD")
 	if username != "" && password != "" {
 		if err := authSvc.EnsureAdmin(ctx, username, password); err != nil {
-			log.Fatalf("seed admin: %v", err)
+			fatal("server.seed_admin_failed", err)
 		}
 	}
 
@@ -74,7 +87,7 @@ func main() {
 
 	manager, err := dbmanager.NewPostgresManagerFromEnv(db)
 	if err != nil {
-		log.Fatal(err)
+		fatal("server.manager_failed", err)
 	}
 	authorizer := authz.NewPostgresAuthorizer(db)
 
@@ -84,7 +97,7 @@ func main() {
 		os.Getenv("DB_ENCRYPTION_KEY"),
 	)
 	if err != nil {
-		log.Fatal(err)
+		fatal("server.resource_handler_failed", err)
 	}
 	resourceHandler = resourceHandler.WithSessionManagerFactory(sessionFactory)
 
@@ -95,11 +108,40 @@ func main() {
 	databaseMux := http.NewServeMux()
 	dbmanager.NewViewer(db, manager, authorizer).Register(databaseMux)
 	migration.NewHandler(db, manager, authorizer).Register(databaseMux)
+	workflow.NewHandler(db, authorizer).Register(databaseMux)
+	history.NewHandler(db, authorizer).Register(databaseMux)
 	databaseRoutes := auth.RequireLogin(databaseMux)
 	mux.Handle("/api/databases", databaseRoutes)
 	mux.Handle("/api/databases/", databaseRoutes)
 	mux.Handle("/api/migrations/", databaseRoutes)
+	mux.Handle("/api/reviews", databaseRoutes)
+	mux.Handle("/api/change-requests/", databaseRoutes)
+	mux.Handle("/api/jobs/", databaseRoutes)
 
-	log.Println("listening on http://localhost:8080")
-	log.Fatal(http.ListenAndServe(":8080", mux))
+	// /metrics di luar HTTPMiddleware supaya scrape Prometheus tidak membanjiri log
+	root := http.NewServeMux()
+	root.Handle("GET /metrics", newMetrics(db).Handler())
+	root.Handle("/", obs.HTTPMiddleware(mux))
+
+	srv := &http.Server{Addr: ":8080", Handler: root}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fatal("server.stopped", err)
+		}
+	}()
+	slog.Info("server.started", "addr", ":8080")
+
+	<-ctx.Done()
+	stop()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("server.shutdown_failed", "error", obs.Redact(err.Error()))
+	}
+	slog.Info("server.stopped")
+}
+
+func fatal(event string, err error) {
+	slog.Error(event, "error", obs.Redact(err.Error()))
+	os.Exit(1)
 }

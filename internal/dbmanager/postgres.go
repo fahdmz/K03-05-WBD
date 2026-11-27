@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/fahdmz/K03-05-WBD/internal/obs"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -219,6 +220,12 @@ func targetPoolConfig(cfg ConnConfig) (*pgxpool.Config, error) {
 		return nil, errors.New("invalid target database connection settings")
 	}
 	parsed.MaxConns = 5
+	// transaksi dari worker yang mati keras jangan nahan lock tabel berjam-jam
+	parsed.ConnConfig.RuntimeParams["idle_in_transaction_session_timeout"] = "60000"
+	parsed.ConnConfig.RuntimeParams["tcp_keepalives_idle"] = "30"
+	parsed.ConnConfig.RuntimeParams["tcp_keepalives_interval"] = "10"
+	parsed.ConnConfig.RuntimeParams["tcp_keepalives_count"] = "3"
+	parsed.ConnConfig.Tracer = obs.PgxTracer()
 	return parsed, nil
 }
 

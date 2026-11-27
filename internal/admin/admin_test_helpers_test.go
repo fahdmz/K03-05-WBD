@@ -204,12 +204,17 @@ func newAdminIntegrationEnv(t *testing.T) *adminIntegrationEnv {
 	}
 	t.Cleanup(db.Close)
 
-	schema, err := os.ReadFile("../../migrations/001_init.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(ctx, string(schema)); err != nil {
-		t.Fatal(err)
+	for _, file := range []string{
+		"../../migrations/001_init.sql",
+		"../../migrations/002_m2.sql",
+	} {
+		schema, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(ctx, string(schema)); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	manager := &adminTestManager{}

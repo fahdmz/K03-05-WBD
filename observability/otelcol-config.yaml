@@ -1,0 +1,85 @@
+# Salinan otelcol-config.yaml bawaan grafana/otel-lgtm:0.41.1 (/otel-lgtm/otelcol-config.yaml),
+# ditambah receiver prometheus/app yang men-scrape /metrics server dan worker di host.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+        cors:
+          allowed_origins:
+            - http://*
+  prometheus/collector:
+    config:
+      scrape_configs:
+        - job_name: "opentelemetry-collector"
+          scrape_interval: 1s
+          static_configs:
+            - targets: ["127.0.0.1:8888"]
+  # Scrape /metrics server dan worker yang jalan di host (bukan di container).
+  prometheus/app:
+    config:
+      scrape_configs:
+        - job_name: "server"
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["host.docker.internal:8080"]
+        - job_name: "worker"
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["host.docker.internal:9091"]
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+    path: "/ready"
+
+processors:
+  batch:
+
+exporters:
+  otlp_http/metrics:
+    endpoint: http://127.0.0.1:9090/api/v1/otlp
+    tls:
+      insecure: true
+  otlp_http/traces:
+    endpoint: http://127.0.0.1:4418
+    tls:
+      insecure: true
+  otlp_http/logs:
+    endpoint: http://127.0.0.1:3100/otlp
+    tls:
+      insecure: true
+  otlp_grpc/profiles:
+    endpoint: http://127.0.0.1:4040
+    tls:
+      insecure: true
+  debug/metrics:
+    verbosity: detailed
+  debug/traces:
+    verbosity: detailed
+  debug/logs:
+    verbosity: detailed
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_http/traces]
+      #exporters: [otlp_http/traces,debug/traces]
+    metrics:
+      receivers: [otlp, prometheus/collector, prometheus/app]
+      processors: [batch]
+      exporters: [otlp_http/metrics]
+      #exporters: [otlp_http/metrics,debug/metrics]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_http/logs]
+      #exporters: [otlp_http/logs,debug/logs]
+    profiles:
+      receivers: [otlp]
+      exporters: [otlp_grpc/profiles]

@@ -1,0 +1,43 @@
+package obs
+
+import (
+	"net/http"
+	"time"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+)
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func HTTPMiddleware(next http.Handler) http.Handler {
+	logged := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+
+		attrs := []any{
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", rec.status,
+			"duration_ms", ms(time.Since(start)),
+		}
+		if rec.status >= 500 {
+			Logger(r.Context()).Error("http.request", attrs...)
+			return
+		}
+		Logger(r.Context()).Info("http.request", attrs...)
+	})
+	return otelhttp.NewHandler(logged, "http.request",
+		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+			return r.Method + " " + r.URL.Path
+		}),
+	)
+}

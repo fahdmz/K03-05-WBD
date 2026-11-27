@@ -459,38 +459,42 @@ func TestListGroupsDetailsIntegration(t *testing.T) {
 
 	// Explicit JSON fields also verify the public response contract.
 	type listedGroup struct {
-		ID          int64              `json:"id"`
-		Name        string             `json:"name"`
-		Description string             `json:"description"`
-		MemberIDs   []int64            `json:"memberIds"`
-		Access      []groupAccessEntry `json:"access"`
+		ID           int64              `json:"id"`
+		Name         string             `json:"name"`
+		Description  string             `json:"description"`
+		LeaderUserID *int64             `json:"leaderUserId"`
+		MemberIDs    []int64            `json:"memberIds"`
+		Access       []groupAccessEntry `json:"access"`
 	}
 
 	got := adminTestDecode[[]listedGroup](t, rec)
 
 	want := []listedGroup{
 		{
-			ID:          10,
-			Name:        "team",
-			Description: "original",
-			MemberIDs:   []int64{20, 30},
+			ID:           10,
+			Name:         "team",
+			Description:  "original",
+			LeaderUserID: nil,
+			MemberIDs:    []int64{20, 30},
 			Access: []groupAccessEntry{
 				{DatabaseID: 10, Level: "view"},
 				{DatabaseID: 11, Level: "edit"},
 			},
 		},
 		{
-			ID:          11,
-			Name:        "empty-group",
-			Description: "",
-			MemberIDs:   []int64{},
-			Access:      []groupAccessEntry{},
+			ID:           11,
+			Name:         "empty-group",
+			Description:  "",
+			LeaderUserID: nil,
+			MemberIDs:    []int64{},
+			Access:       []groupAccessEntry{},
 		},
 		{
-			ID:          12,
-			Name:        "other-group",
-			Description: "separate",
-			MemberIDs:   []int64{10},
+			ID:           12,
+			Name:         "other-group",
+			Description:  "separate",
+			LeaderUserID: nil,
+			MemberIDs:    []int64{10},
 			Access: []groupAccessEntry{
 				{DatabaseID: 11, Level: "view"},
 			},
@@ -499,5 +503,53 @@ func TestListGroupsDetailsIntegration(t *testing.T) {
 
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("groups = %#v, want %#v", got, want)
+	}
+}
+
+func TestGroupLeaderIntegration(t *testing.T) {
+	e := newAdminIntegrationEnv(t)
+	e.seed(t)
+	e.exec(t, "INSERT INTO group_members (group_id, user_id) VALUES (10, 20)")
+
+	// Reject non-member as leader.
+	e.call(t, e.res.UpdateGroup, "PATCH", "10", `{"leaderUserId":30}`, 400)
+
+	// Set member 20 as leader.
+	rec := e.call(t, e.res.UpdateGroup, "PATCH", "10", `{"leaderUserId":20}`, 200)
+	group := adminTestDecode[groupResponse](t, rec)
+	if group.LeaderUserID == nil || *group.LeaderUserID != 20 {
+		t.Fatalf("leaderUserId = %v, want 20", group.LeaderUserID)
+	}
+
+	// Omitting leaderUserId must preserve the existing leader.
+	rec = e.call(t, e.res.UpdateGroup, "PATCH", "10", `{"description":"with leader"}`, 200)
+	group = adminTestDecode[groupResponse](t, rec)
+	if group.LeaderUserID == nil || *group.LeaderUserID != 20 {
+		t.Fatalf("omitting leaderUserId cleared leader: %+v", group)
+	}
+
+	// Explicit null clears leader.
+	rec = e.call(t, e.res.UpdateGroup, "PATCH", "10", `{"leaderUserId":null}`, 200)
+	group = adminTestDecode[groupResponse](t, rec)
+	if group.LeaderUserID != nil {
+		t.Fatalf("expected leaderUserId to be nil, got %v", *group.LeaderUserID)
+	}
+
+	// Re-assign leader 20, then remove 20 from group members -> leader must be cleared.
+	e.call(t, e.res.UpdateGroup, "PATCH", "10", `{"leaderUserId":20}`, 200)
+	e.call(t, e.res.SetGroupMembers, "PUT", "10", `{"userIds":[30]}`, 200)
+
+	var leaderID *int64
+	e.scan(t, "SELECT leader_user_id FROM groups WHERE id = 10", nil, &leaderID)
+	if leaderID != nil {
+		t.Fatalf("expected leader_user_id to be NULL after member removal, got %d", *leaderID)
+	}
+
+	// Keep leader when member stays in group.
+	e.call(t, e.res.UpdateGroup, "PATCH", "10", `{"leaderUserId":30}`, 200)
+	e.call(t, e.res.SetGroupMembers, "PUT", "10", `{"userIds":[20,30]}`, 200)
+	e.scan(t, "SELECT leader_user_id FROM groups WHERE id = 10", nil, &leaderID)
+	if leaderID == nil || *leaderID != 30 {
+		t.Fatalf("expected leader_user_id = 30 to be preserved, got %v", leaderID)
 	}
 }

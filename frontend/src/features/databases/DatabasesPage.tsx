@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, ApiError } from '../../lib/api'
+import HistoryPanel from '../history/HistoryPanel'
+import JobsPanel from '../jobs/JobsPanel'
 import MigrationWorkspace from './MigrationWorkspace'
 
 type DatabaseSummary = {
@@ -47,7 +49,14 @@ type TableRows = {
 }
 
 type TableTab = 'structure' | 'data'
-type DatabaseTab = 'explorer' | 'migrations'
+type DatabaseTab = 'explorer' | 'migrations' | 'history' | 'jobs'
+
+const databaseTabs: Array<{ key: DatabaseTab; label: string }> = [
+    { key: 'explorer', label: 'Database explorer' },
+    { key: 'migrations', label: 'Migration' },
+    { key: 'history', label: 'History' },
+    { key: 'jobs', label: 'Jobs' },
+]
 
 function errorMessage(error: unknown) {
     if (error instanceof ApiError) return error.message
@@ -192,7 +201,7 @@ export default function DatabasesPage() {
                     </button>
                 ) : (
                     <button onClick={() => void loadDatabases()} disabled={loading === 'databases'} className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50">
-                        Muat ulang
+                        {loading === 'databases' ? 'Memuat…' : 'Muat ulang'}
                     </button>
                 )}
             </div>
@@ -249,11 +258,21 @@ export default function DatabasesPage() {
 
             {selectedDatabase && (
                 <div className="space-y-4">
-                    <div className="flex gap-1 border-b border-slate-200">
-                        <button onClick={() => setDatabaseTab('explorer')} className={`border-b-2 px-4 py-3 text-sm font-semibold ${databaseTab === 'explorer' ? 'border-cyan-700 text-cyan-800' : 'border-transparent text-slate-500 hover:text-slate-800'}`}>Database explorer</button>
-                        <button onClick={() => setDatabaseTab('migrations')} className={`border-b-2 px-4 py-3 text-sm font-semibold ${databaseTab === 'migrations' ? 'border-cyan-700 text-cyan-800' : 'border-transparent text-slate-500 hover:text-slate-800'}`}>Migration</button>
+                    <div className="flex gap-1 overflow-x-auto border-b border-slate-200">
+                        {databaseTabs.map((tab) => (
+                            <button
+                                key={tab.key}
+                                onClick={() => setDatabaseTab(tab.key)}
+                                className={`shrink-0 whitespace-nowrap border-b-2 px-4 py-3 text-sm font-semibold ${databaseTab === tab.key ? 'border-cyan-700 text-cyan-800' : 'border-transparent text-slate-500 hover:text-slate-800'}`}
+                            >
+                                {tab.label}
+                            </button>
+                        ))}
                     </div>
-                    {databaseTab === 'migrations' ? <MigrationWorkspace database={selectedDatabase} /> : (
+                    {databaseTab === 'migrations' && <MigrationWorkspace database={selectedDatabase} />}
+                    {databaseTab === 'history' && <HistoryPanel databaseId={selectedDatabase.id} canEdit={selectedDatabase.level === 'edit'} />}
+                    {databaseTab === 'jobs' && <JobsPanel databaseId={selectedDatabase.id} />}
+                    {databaseTab === 'explorer' && (
                     <div className="grid gap-5 xl:grid-cols-[260px_minmax(0,1fr)]">
                     <aside className="space-y-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
                         <div>
@@ -352,8 +371,8 @@ export default function DatabasesPage() {
                                                 <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                                                     <p className="text-sm text-slate-500">{tableRows.total.toLocaleString()} baris · halaman {page}</p>
                                                     <div className="flex gap-2">
-                                                        <button disabled={!canGoBack} onClick={() => void loadTable(selectedDatabase, selectedSchema, selectedTable, page - 1)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">Sebelumnya</button>
-                                                        <button disabled={!canGoForward} onClick={() => void loadTable(selectedDatabase, selectedSchema, selectedTable, page + 1)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">Berikutnya</button>
+                                                        <button disabled={!canGoBack || loading === 'table'} onClick={() => void loadTable(selectedDatabase, selectedSchema, selectedTable, page - 1)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">Sebelumnya</button>
+                                                        <button disabled={!canGoForward || loading === 'table'} onClick={() => void loadTable(selectedDatabase, selectedSchema, selectedTable, page + 1)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">Berikutnya</button>
                                                     </div>
                                                 </div>
                                                 {tableRows.columns.length === 0 ? <EmptyState>Tabel ini belum memiliki kolom atau data.</EmptyState> : (

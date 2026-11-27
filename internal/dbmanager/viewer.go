@@ -16,6 +16,9 @@ import (
 
 const maxPageSize int64 = 100
 
+// schema bukti eksekusi worker, nggak boleh kelihatan di viewer
+const hiddenSchema = "_platform"
+
 type Viewer struct {
 	platform   *pgxpool.Pool
 	manager    Manager
@@ -61,13 +64,24 @@ func (v *Viewer) listDatabases(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	result := make([]databaseSummary, 0)
+	// rows ditutup dulu supaya EffectiveLevel tidak butuh koneksi kedua dari pool.
+	candidates := make([]databaseSummary, 0)
 	for rows.Next() {
 		var item databaseSummary
 		if err := rows.Scan(&item.ID, &item.Name); err != nil {
 			web.WriteError(w, http.StatusInternalServerError, "Gagal membaca daftar database")
 			return
 		}
+		candidates = append(candidates, item)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		web.WriteError(w, http.StatusInternalServerError, "Gagal membaca daftar database")
+		return
+	}
+
+	result := make([]databaseSummary, 0, len(candidates))
+	for _, item := range candidates {
 		level, err := v.authorizer.EffectiveLevel(r.Context(), u.ID, item.ID)
 		if err != nil {
 			web.WriteError(w, http.StatusInternalServerError, "Gagal memeriksa akses database")
@@ -83,10 +97,6 @@ func (v *Viewer) listDatabases(w http.ResponseWriter, r *http.Request) {
 		}
 		result = append(result, item)
 	}
-	if err := rows.Err(); err != nil {
-		web.WriteError(w, http.StatusInternalServerError, "Gagal membaca daftar database")
-		return
-	}
 	web.WriteJSON(w, http.StatusOK, result)
 }
 
@@ -98,9 +108,9 @@ func (v *Viewer) listSchemas(w http.ResponseWriter, r *http.Request) {
 	rows, err := pool.Query(r.Context(), `
 		SELECT schema_name
 		FROM information_schema.schemata
-		WHERE schema_name NOT IN ('pg_catalog', 'information_schema')
+		WHERE schema_name NOT IN ('pg_catalog', 'information_schema', $1)
 		  AND schema_name NOT LIKE 'pg_toast%'
-		ORDER BY schema_name`)
+		ORDER BY schema_name`, hiddenSchema)
 	if err != nil {
 		writeTargetError(w, err)
 		return
@@ -386,6 +396,10 @@ func (v *Viewer) authorizedSchemaPool(w http.ResponseWriter, r *http.Request) (*
 	schema := r.PathValue("schema")
 	if schema == "" {
 		web.WriteError(w, http.StatusBadRequest, "Schema tidak valid")
+		return nil, "", false
+	}
+	if schema == hiddenSchema {
+		web.WriteError(w, http.StatusNotFound, "Schema tidak ditemukan")
 		return nil, "", false
 	}
 	return pool, schema, true
