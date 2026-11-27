@@ -38,6 +38,7 @@ Alur berikut adalah jalur utama yang didukung platform dari awal sampai akhir. D
 ## Menjalankan secara lokal
 
 Database lokal yang dipakai adalah `platform-db` (port 5435, database internal platform), `target-db` (port 5433, database contoh `shop` untuk demo dan uji data besar), dan `test-db` (port 5434, khusus automated test, datanya di tmpfs sehingga hilang setiap container berhenti).
+Compose juga berisi service `observability` (Grafana, Prometheus, Tempo, Loki, dan OpenTelemetry Collector) yang ikut jalan dengan `docker compose up -d`. Service ini opsional dan dijelaskan di bagian Bonus, Observability.
 
 Langkah dari root repository:
 
@@ -102,10 +103,12 @@ Nama volume mengikuti nama project Compose, cek dengan `docker volume ls` bila b
 | `DB_ENCRYPTION_KEY` | server, worker | Key AES-256 (Base64 dari 32 byte) untuk mengenkripsi password koneksi database target. Jangan diganti setelah ada koneksi tersimpan. |
 | `WORKER_CONCURRENCY` | worker | Jumlah loop claim paralel dalam satu proses worker. Default 4. Nilai bukan angka atau kurang dari 1 diabaikan dengan log `worker.bad_concurrency`. |
 | `WORKER_METRICS_ADDR` | worker | Alamat endpoint `/metrics` worker. Default `:9091`. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | server, worker | Alamat OTLP HTTP OpenTelemetry Collector, misalnya `http://localhost:4318`. Kalau di-set, span dan log dikirim ke Collector. Kalau kosong, span ditulis ke stderr dan log hanya ke stdout. |
 | `TARGET_DATABASE_URL` | seed-bigdata | Database tujuan seed. Default `postgres://target:target@localhost:5433/shop?sslmode=disable`. |
 | `TEST_DATABASE_URL` | test | Default `postgres://test:test@localhost:5434/test?sslmode=disable`. |
 
 `WORKER_CONCURRENCY`, `WORKER_METRICS_ADDR`, dan `TARGET_DATABASE_URL` tidak ada di `.env.example` karena opsional. Ketiganya bisa ditambahkan ke `.env` atau di-set langsung di terminal.
+`OTEL_EXPORTER_OTLP_ENDPOINT` ada di `.env.example` dalam keadaan dikomentari, jadi aktifkan dengan menghapus tanda `#` atau set langsung di terminal.
 
 ### Seed dataset besar
 
@@ -303,6 +306,7 @@ Durasi tersebut jauh di atas batas 1 detik, sehingga dataset ini memenuhi ketent
 ## Activity logging dan tracing
 
 Server dan worker menulis log sebagai JSON satu baris per event ke stdout lewat `log/slog` yang dikonfigurasi di `internal/obs`. Kunci pesan bawaan slog (`msg`) diganti menjadi `event`, dan setiap baris diberi atribut `service` (`server` atau `worker`). Logger diambil dari context, sehingga atribut yang dipasang di awal (misalnya ID job) ikut terbawa ke semua log di bawahnya, termasuk log query SQL. Bila context membawa span aktif, `trace_id` dan `span_id` ditambahkan otomatis. `cmd/seed-bigdata` tidak memakai `internal/obs`: program itu membuat logger JSON slog sendiri dengan atribut `service` bernilai `seed-bigdata`, sehingga nama event-nya tetap berada di kunci `msg` dan tidak ada `trace_id`.
+Kalau `OTEL_EXPORTER_OTLP_ENDPOINT` di-set, setiap log server dan worker juga dikirim lewat OTLP ke Loki. Di sana `trace_id` dan `span_id` dibawa oleh field bawaan LogRecord, bukan atribut, supaya tidak tercatat dua kali.
 
 | Atribut | Isi |
 |---|---|
@@ -321,7 +325,7 @@ Daftar nama event:
 
 | Kelompok | Event |
 |---|---|
-| HTTP dan server | `http.request`, `server.started`, `server.stopped`, `server.db_connect_failed`, `server.seed_admin_failed`, `server.manager_failed`, `server.resource_handler_failed`, `obs.setup_failed` |
+| HTTP dan server | `http.request`, `server.started`, `server.stopped`, `server.shutdown_failed`, `server.db_connect_failed`, `server.seed_admin_failed`, `server.manager_failed`, `server.resource_handler_failed`, `obs.setup_failed` |
 | SQL | `sql.start`, `sql.result`, `sql.begin`, `sql.commit`, `sql.rollback` |
 | Workflow | `change_request.created` |
 | Worker | `worker.started`, `worker.stopped`, `worker.bad_concurrency`, `worker.metrics_failed`, `worker.claim_failed`, `worker.db_connect_failed`, `worker.manager_failed` |
@@ -356,12 +360,14 @@ worker.job                              (worker, parent = span HTTP di atas)
 
 Saat menjalankan change request, server menyuntikkan trace context ke `jobs.trace_context`. Worker mengekstraknya sebelum membuat span `worker.job`, sehingga span worker berada dalam trace yang sama dengan request HTTP yang memicunya walaupun berjalan di proses lain dan bisa beberapa detik kemudian. Tidak ada span khusus bernama queue: mata rantai antrean adalah span `db.query` untuk `INSERT INTO jobs` ditambah `jobs.trace_context`. Query claim di worker terjadi sebelum ekstraksi itu sehingga tidak masuk ke trace tersebut. Span query memakai nama `db.query`, `db.begin`, `db.commit`, atau `db.rollback` dengan atribut `db.system`, `db.statement` (sudah disamarkan), `db.rows_affected`, dan `db.sqlstate` bila gagal.
 
-Exporter yang dipakai adalah exporter console OpenTelemetry (`stdouttrace`) yang menulis span ke **stderr**, satu objek JSON per span, dengan batch setiap 1 detik. Karena log ke stdout dan span ke stderr, keduanya mudah dipisah:
+Exporter dipilih dari `OTEL_EXPORTER_OTLP_ENDPOINT`. Kalau variabel itu tidak di-set, span ditulis oleh exporter console OpenTelemetry (`stdouttrace`) ke **stderr**, satu objek JSON per span, dengan batch setiap 1 detik. Karena log ke stdout dan span ke stderr, keduanya mudah dipisah:
 
 ```
 go run ./cmd/server 2> spans.json
 go run ./cmd/worker 2> worker-spans.json
 ```
+
+Kalau variabel itu di-set, span dikirim lewat OTLP HTTP (`otlptracehttp`) ke `<endpoint>/v1/traces` dan tidak lagi ditulis ke stderr, sedangkan log tetap ke stdout dan ikut dikirim ke `<endpoint>/v1/logs`. Contoh output di bawah diambil dengan exporter stderr.
 
 ### Contoh output
 
@@ -459,6 +465,87 @@ Analisis memakai `EXPLAIN (FORMAT JSON, ANALYZE FALSE)` untuk satu statement. In
 
 Workflow `.github/workflows/codeql.yml` menjalankan analisis statis CodeQL dengan query suite `security-extended` untuk dua bahasa dalam matrix terpisah: Go dengan build mode `autobuild` dan JavaScript/TypeScript dengan build mode `none`. Workflow berjalan pada push ke `main`, `dev`, `feat/dev`, dan `feat/m2-workflow-approval`, pada pull request ke `main`, `dev`, dan `feat/dev`, setiap Senin pukul 01.30 UTC, dan bisa dipicu manual lewat `workflow_dispatch`. Setiap bahasa dianalisis dengan kategori `/language:<bahasa>`, dan hasilnya diunggah ke tab Security GitHub berkat permission `security-events: write`. Permission lain hanya baca (`contents`, `actions`, `packages`).
 
+### Observability
+
+Server dan worker bisa mengirim trace, log, dan metrik ke stack Grafana LGTM yang berjalan sebagai service `observability` (`grafana/otel-lgtm:0.41.1`) di Docker Compose. Di dalam satu container itu ada OpenTelemetry Collector, Tempo, Loki, Prometheus, dan Grafana.
+
+```
+server (:8080) ──┐  OTLP HTTP :4318 (trace dan log)
+worker (:9091) ──┼──────────────────────────────────►  OpenTelemetry Collector
+                 │  scrape /metrics setiap 15 detik          │      │      │
+                 └◄──────────────────────────────────────────┘      │      │
+                                                       trace ▼  log ▼  metrik ▼
+                                                        Tempo    Loki   Prometheus
+                                                           └───────┼───────┘
+                                                                Grafana (:3000)
+```
+
+Trace dan log didorong oleh aplikasi lewat OTLP. Metrik tidak didorong, melainkan diambil Collector dari `/metrics` server dan worker di host (`host.docker.internal`) dengan receiver `prometheus/app`, lalu diteruskan ke Prometheus lewat OTLP. Nama metrik tetap sama seperti di bagian Metrik. Collector menambahkan label `job` (`server` atau `worker`), `instance`, `service_name`, dan `service_instance_id`.
+
+Cara menjalankan:
+
+1. Jalankan stack observability:
+   ```
+   docker compose up -d observability
+   ```
+2. Jalankan server dan worker dengan endpoint OTLP, atau aktifkan baris yang sama di `.env`:
+   ```
+   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 go run ./cmd/server
+   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 go run ./cmd/worker
+   ```
+3. Buka http://localhost:3000 (login `admin` / `admin`, image juga mengizinkan akses anonim), lalu buka dashboard **K03-05-WBD Observability** di menu Dashboards. Dashboard ter-provision otomatis, tanpa import manual.
+
+Counter dan histogram worker baru muncul di Prometheus setelah ada job yang di-claim atau selesai, jadi panelnya kosong sampai ada migration yang dijalankan. Karena series lahir langsung dengan nilai 1, `rate()` tidak bisa melihat observasi pertamanya. Oleh sebab itu panel job selesai dan ketiga histogram memakai nilai kumulatif sejak worker start, dan nilainya kembali ke nol setiap worker di-restart. Panel retry, batch, dan row memakai `rate` dengan `$__rate_interval` (minimal 4 menit karena interval datasource Prometheus 60 detik), sehingga hanya terisi bila ada kejadian dalam jendela tersebut.
+
+| File | Isi |
+|---|---|
+| `observability/otelcol-config.yaml` | Config Collector, salinan config bawaan image ditambah receiver `prometheus/app`. Di-mount ke `/otel-lgtm/otelcol-config.yaml`. |
+| `observability/grafana/provisioning/dashboards/k03-05-wbd.yaml` | Provider dashboard. Di-mount ke `/otel-lgtm/grafana/conf/provisioning/dashboards/`, di samping provider bawaan image. |
+| `observability/grafana/dashboards/k03-05-wbd.json` | JSON dashboard. Folder ini di-mount ke `/otel-lgtm/k03-05-wbd-dashboards`. |
+
+Panel dashboard. Semua panel metrik memakai datasource `prometheus`.
+
+| Panel | Query |
+|---|---|
+| Jumlah job per status | `sum by (status) (worker_jobs{job="worker"})` |
+| Job selesai per status | `sum by (status) (worker_jobs_finished_total{job="worker"})` |
+| Retry per action dan mode | `sum by (action, mode) (rate(worker_job_retries_total{job="worker"}[$__rate_interval]))` |
+| Waktu tunggu queue (p50, p95) | `histogram_quantile(0.95, sum by (le) (worker_queue_wait_seconds_bucket{job="worker"}))`, dan 0.5 untuk p50 |
+| Durasi migration per action dan mode (p50, p95, rata-rata) | `histogram_quantile(0.95, sum by (le, action, mode) (worker_migration_duration_seconds_bucket{job="worker"}))`, 0.5 untuk p50, dan rata-rata `sum by (action, mode) (worker_migration_duration_seconds_sum{job="worker"}) / sum by (action, mode) (worker_migration_duration_seconds_count{job="worker"})` |
+| Waktu tunggu lock per hasil (p50, p95) | `histogram_quantile(0.95, sum by (le, result) (worker_lock_wait_seconds_bucket{job="worker"}))`, dan 0.5 untuk p50 |
+| Batch committed per arah | `sum by (direction) (rate(worker_batches_committed_total{job="worker"}[$__rate_interval]))` |
+| Row committed per arah | `sum by (direction) (rate(worker_rows_committed_total{job="worker"}[$__rate_interval]))` |
+| Pool database server (aktif, idle) | `sum by (state) (server_db_pool_connections{job="server", state=~"active\|idle"})` |
+| Pool database worker (aktif, idle) | `sum by (state) (worker_db_pool_connections{job="worker", state=~"active\|idle"})` |
+| Waktu tunggu acquire pool | `rate(server_db_pool_acquire_wait_seconds_total{job="server"}[$__rate_interval])` dan `rate(worker_db_pool_acquire_wait_seconds_total{job="worker"}[$__rate_interval])` |
+| Log server dan worker (Loki) | `{service_name=~"server\|worker"}` |
+
+Panel log menampilkan log dari Loki. Detail setiap baris memuat `trace_id` beserta link ke trace yang sama di Tempo, dan dari Tempo tombol Logs for this span kembali ke Loki. Dengan begitu satu eksekusi bisa diikuti dari angka di panel, ke log, lalu ke trace-nya.
+
+Contoh korelasi dari verifikasi lokal, untuk satu apply mode batch pada `orders_big` (job 14, execution ID `dbecff23-661d-492d-b22b-e71fcee3035f`). Request Jalankan di server dan pemrosesan job di worker berada dalam trace yang sama, `0dcbb027a28af6f3bd9d32dbdf16dcd8`, yang di Tempo berisi 21061 span (11 dari server, 21050 dari worker):
+
+| Service | Span | span_id | Parent | Durasi |
+|---|---|---|---|---|
+| server | `POST /api/change-requests/15/run` (status 202) | `08a29344e7035716` | root | 37,2 ms |
+| server | `db.query` untuk `INSERT INTO jobs` | `9ccd85ab92d4e868` | `08a29344e7035716` | |
+| worker | `worker.job` (`job.id` 14) | `cb93a6e0f23d6f9e` | `08a29344e7035716` | 22960,2 ms |
+| worker | `lock.acquire` | `67e1b848ee2ebd5b` | `cb93a6e0f23d6f9e` | 9,3 ms |
+| worker | `revalidate` | `888bb0d31c58d035` | `cb93a6e0f23d6f9e` | 22,5 ms |
+| worker | `batch` pertama (lo 0, hi 1000), satu dari 3000 span batch | `742ca51ab7579212` | `cb93a6e0f23d6f9e` | 66,8 ms |
+
+Query Loki `{service_name=~"server|worker"} | trace_id="0dcbb027a28af6f3bd9d32dbdf16dcd8"` mengembalikan 19 baris dari server dan 33089 baris dari worker, misalnya:
+
+| Waktu | service_name | Event | span_id | Keterangan |
+|---|---|---|---|---|
+| 08:34:23.501 | server | `http.request` | `08a29344e7035716` | path `/api/change-requests/15/run`, status 202 |
+| 08:34:24.177 | worker | `lock.acquired` | `cb93a6e0f23d6f9e` | job_id 14 |
+| 08:34:24.241 | worker | `job.started` | `cb93a6e0f23d6f9e` | job_id 14, attempt 1 |
+| 08:34:47.122 | worker | `job.finished` | `cb93a6e0f23d6f9e` | job_id 14, status success |
+
+`span_id` di log sama dengan span di Tempo: log `http.request` milik span HTTP server, dan log worker milik span `worker.job`, yang parent-nya adalah span HTTP itu. Metrik worker yang sama-sama berasal dari job ini: `worker_jobs_finished_total{status="success",action="apply",mode="batch"}` bernilai 1, `worker_migration_duration_seconds_sum` dengan label yang sama bernilai 22,96 detik (sesuai durasi span `worker.job`), `worker_batches_committed_total{direction="up"}` bernilai 3000 (sesuai jumlah span `batch`), dan `worker_rows_committed_total{direction="up"}` bernilai 3000000. Metrik tidak membawa ID job atau trace, jadi hubungannya ditarik lewat label `action`, `mode`, dan `direction` serta waktu kejadian, lalu detailnya dibuka lewat `trace_id` di log.
+
+Label metrik dashboard hanya `job`, `status`, `action`, `mode`, `direction`, `result`, dan `state`, karena semuanya punya himpunan nilai kecil dan tetap. Alasannya sama dengan yang dijelaskan di bagian Metrik: ID dan teks bebas sebagai label membuat jumlah time series tumbuh tanpa batas dan bisa membocorkan data. Detail per eksekusi dicari lewat log dan trace, yang terhubung dengan `trace_id`.
+
 ## Format error
 
 Semua error dikembalikan dalam format `{"error": "pesan"}`, dengan status 400 (input tidak valid atau status tidak memungkinkan aksi), 401 (belum login), 403 (tidak punya akses, bukan leader, atau CSRF salah), 404, 409 (konflik, misalnya aturan posisi, change request terbuka, atau sudah diantrekan), 500, dan 502 (koneksi ke database target gagal). Endpoint Jalankan membalas 202 karena eksekusi berlangsung di worker.
@@ -486,6 +573,7 @@ internal/store/             koneksi pool platform
 internal/web/               helper JSON response
 migrations/001_init.sql     schema database internal M1
 migrations/002_m2.sql       schema tambahan M2 dan konversi data M1
+observability/              config Collector, provisioning, dan dashboard Grafana
 frontend/src/components/    komponen bersama (layout, tabel, guard)
 frontend/src/features/      halaman per fitur (admin, auth, databases, history, jobs, reviews)
 frontend/src/lib/           klien API, auth, format, toast

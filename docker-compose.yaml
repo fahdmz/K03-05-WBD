@@ -42,6 +42,8 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./observability/otelcol-config.yaml:/otel-lgtm/otelcol-config.yaml:ro
+      - ./observability/grafana/provisioning/dashboards/k03-05-wbd.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/k03-05-wbd.yaml:ro
+      - ./observability/grafana/dashboards:/otel-lgtm/k03-05-wbd-dashboards:ro
 
 volumes:
   platform-data:
