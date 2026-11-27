@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/fahdmz/K03-05-WBD/internal/admin"
 	"github.com/fahdmz/K03-05-WBD/internal/auth"
@@ -26,7 +30,8 @@ func main() {
 		fatal("obs.setup_failed", err)
 	}
 	defer shutdown(context.Background())
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	db, err := store.Connect(ctx, os.Getenv("DATABASE_URL"))
 	if err != nil {
@@ -118,10 +123,22 @@ func main() {
 	root.Handle("GET /metrics", newMetrics(db).Handler())
 	root.Handle("/", obs.HTTPMiddleware(mux))
 
+	srv := &http.Server{Addr: ":8080", Handler: root}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fatal("server.stopped", err)
+		}
+	}()
 	slog.Info("server.started", "addr", ":8080")
-	if err := http.ListenAndServe(":8080", root); err != nil {
-		fatal("server.stopped", err)
+
+	<-ctx.Done()
+	stop()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("server.shutdown_failed", "error", obs.Redact(err.Error()))
 	}
+	slog.Info("server.stopped")
 }
 
 func fatal(event string, err error) {

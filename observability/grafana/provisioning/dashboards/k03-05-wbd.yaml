@@ -1,0 +1,13 @@
+# Provider dashboard K03-05-WBD. Di-mount ke /otel-lgtm/grafana/conf/provisioning/dashboards/
+# di container grafana/otel-lgtm, di samping provider bawaan image.
+apiVersion: 1
+
+providers:
+  - name: "K03-05-WBD"
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /otel-lgtm/k03-05-wbd-dashboards
+      foldersFromFilesStructure: false

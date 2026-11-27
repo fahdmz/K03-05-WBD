@@ -76,3 +76,32 @@ func TestSpanName(t *testing.T) {
 		}
 	}
 }
+
+type captureHandler struct{ got *context.Context }
+
+func (h captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h captureHandler) Handle(ctx context.Context, _ slog.Record) error {
+	*h.got = ctx
+	return nil
+}
+func (h captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h captureHandler) WithGroup(string) slog.Handler      { return h }
+
+func TestLoggerPassesSpanContext(t *testing.T) {
+	useTestTracer(t)
+	var got context.Context
+	old := base
+	base = slog.New(captureHandler{&got})
+	t.Cleanup(func() { base = old })
+
+	ctx, span := Start(context.Background(), "test.ctx")
+	defer span.End()
+	Logger(With(ctx, "actor", "tester")).Info("test.event")
+
+	if got == nil {
+		t.Fatal("handler tidak dipanggil")
+	}
+	if sc := trace.SpanContextFromContext(got); sc.SpanID() != span.SpanContext().SpanID() {
+		t.Fatalf("span di handler = %s, want %s", sc.SpanID(), span.SpanContext().SpanID())
+	}
+}
