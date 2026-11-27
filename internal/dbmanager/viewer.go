@@ -64,13 +64,24 @@ func (v *Viewer) listDatabases(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	result := make([]databaseSummary, 0)
+	// rows ditutup dulu supaya EffectiveLevel tidak butuh koneksi kedua dari pool.
+	candidates := make([]databaseSummary, 0)
 	for rows.Next() {
 		var item databaseSummary
 		if err := rows.Scan(&item.ID, &item.Name); err != nil {
 			web.WriteError(w, http.StatusInternalServerError, "Gagal membaca daftar database")
 			return
 		}
+		candidates = append(candidates, item)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		web.WriteError(w, http.StatusInternalServerError, "Gagal membaca daftar database")
+		return
+	}
+
+	result := make([]databaseSummary, 0, len(candidates))
+	for _, item := range candidates {
 		level, err := v.authorizer.EffectiveLevel(r.Context(), u.ID, item.ID)
 		if err != nil {
 			web.WriteError(w, http.StatusInternalServerError, "Gagal memeriksa akses database")
@@ -85,10 +96,6 @@ func (v *Viewer) listDatabases(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		result = append(result, item)
-	}
-	if err := rows.Err(); err != nil {
-		web.WriteError(w, http.StatusInternalServerError, "Gagal membaca daftar database")
-		return
 	}
 	web.WriteJSON(w, http.StatusOK, result)
 }

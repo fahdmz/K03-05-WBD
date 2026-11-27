@@ -285,6 +285,72 @@ func TestViewerIntegration(t *testing.T) {
 	})
 }
 
+// Regression: listDatabases dulu memanggil EffectiveLevel selagi rows masih
+// terbuka, sehingga satu request butuh dua koneksi dari pool yang sama. Dengan
+// MaxConns 1, request itu menunggu koneksinya sendiri sampai context habis.
+func TestListDatabasesWithSingleConnectionPool(t *testing.T) {
+	platformURL := envOr("VIEWER_TEST_DATABASE_URL", testDatabaseURL())
+	seed := setupPlatformDB(t, platformURL)
+	ctx := context.Background()
+
+	var userID, groupID, dbID int64
+	if err := seed.QueryRow(ctx, `
+		INSERT INTO users (username, password_hash) VALUES ('single_pool_user', 'test')
+		RETURNING id`).Scan(&userID); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if err := seed.QueryRow(ctx, `
+		INSERT INTO groups (name) VALUES ('single_pool_group') RETURNING id`).Scan(&groupID); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	if err := seed.QueryRow(ctx, `
+		INSERT INTO db_connections (name, host, port, dbname, username, password_encrypted)
+		VALUES ('single_pool_db', 'test', 5432, 'test', 'test', $1)
+		RETURNING id`, []byte{1}).Scan(&dbID); err != nil {
+		t.Fatalf("create database record: %v", err)
+	}
+	if _, err := seed.Exec(ctx, `
+		INSERT INTO group_members (group_id, user_id) VALUES ($1, $2)`, groupID, userID); err != nil {
+		t.Fatalf("add member: %v", err)
+	}
+	if _, err := seed.Exec(ctx, `
+		INSERT INTO group_db_access (group_id, db_connection_id, level) VALUES ($1, $2, 'view')`,
+		groupID, dbID); err != nil {
+		t.Fatalf("grant access: %v", err)
+	}
+
+	cfg, err := pgxpool.ParseConfig(platformURL)
+	if err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	cfg.ConnConfig.RuntimeParams["search_path"] = testSchema
+	cfg.MaxConns = 1
+	pool := connectOrSkip(t, cfg)
+	t.Cleanup(pool.Close)
+
+	viewer := NewViewer(pool, Stub{}, authz.NewPostgresAuthorizer(pool))
+	mux := http.NewServeMux()
+	viewer.Register(mux)
+
+	request := viewerTestRequest(http.MethodGet, "/api/databases", userID)
+	reqCtx, cancel := context.WithTimeout(request.Context(), 2*time.Second)
+	defer cancel()
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request.WithContext(reqCtx))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (pool MaxConns 1 kehabisan koneksi?); body=%s",
+			response.Code, http.StatusOK, response.Body.String())
+	}
+	var databases []databaseSummary
+	if err := json.Unmarshal(response.Body.Bytes(), &databases); err != nil {
+		t.Fatalf("decode databases response: %v", err)
+	}
+	if len(databases) != 1 || databases[0].ID != dbID || databases[0].Level != "view" {
+		t.Fatalf("databases = %#v, want database %d with view access", databases, dbID)
+	}
+}
+
 // tempTargetDB bikin database target acak (di-drop pas cleanup) dan balikin pool-nya.
 func tempTargetDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
