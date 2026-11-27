@@ -457,7 +457,20 @@ Analisis memakai `EXPLAIN (FORMAT JSON, ANALYZE FALSE)` untuk satu statement. In
 
 ### CodeQL
 
-Workflow `.github/workflows/codeql.yml` menjalankan analisis statis CodeQL dengan query suite `security-extended` untuk dua bahasa dalam matrix terpisah: Go dengan build mode `autobuild` dan JavaScript/TypeScript dengan build mode `none`. Workflow berjalan pada push ke `main`, `dev`, `feat/dev`, dan `feat/m2-workflow-approval`, pada pull request ke `main`, `dev`, dan `feat/dev`, setiap Senin pukul 01.30 UTC, dan bisa dipicu manual lewat `workflow_dispatch`. Setiap bahasa dianalisis dengan kategori `/language:<bahasa>`, dan hasilnya diunggah ke tab Security GitHub berkat permission `security-events: write`. Permission lain hanya baca (`contents`, `actions`, `packages`).
+Workflow .github/workflows/codeql.yml menjalankan analisis statis CodeQL dengan query suite security-extended untuk dua bahasa dalam matrix terpisah: Go dengan build mode autobuild dan JavaScript/TypeScript dengan build mode none. Workflow berjalan pada push ke main, dev, feat/dev, dan feat/m2-workflow-approval, pada pull request ke main, dev, dan feat/dev, setiap Senin pukul 01.30 UTC, dan bisa dipicu manual lewat workflow_dispatch. Setiap bahasa dianalisis dengan kategori /language:<bahasa>, dan hasilnya diunggah ke tab Security GitHub berkat permission security-events: write. Permission lain hanya baca (contents, actions, packages).
+
+Cakupan kode yang dianalisis mencakup seluruh backend dan worker Go (cmd/ dan internal/) serta seluruh frontend SPA React/TypeScript (frontend/src/).
+
+Hasil scan awal menemukan 2 temuan berlevel Medium pada kode Go dan 0 temuan pada JavaScript/TypeScript:
+
+| Alert | Rule | Severity | Lokasi kode | Potensi dampak | Keputusan dan alasan | Tindak lanjut |
+| --- | --- | --- | --- | --- | --- | --- |
+| #1 | `go/log-injection` (Log entries created from user input) | Medium | `internal/obs/http.go:33` | Karakter kontrol (`\r`, `\n`) pada `r.Method` atau `r.URL.Path` dari request HTTP dapat memalsukan baris log (log forging) pada pencatatan error (`status >= 500`) bila log diproses oleh parser berbasis teks. | **Risiko termitigasi oleh structured JSON logging.** Aplikasi selalu menulis log melalui `slog.NewJSONHandler` (`internal/obs/log.go`), yang secara otomatis meng-escape karakter kontrol (`\r`, `\n`) dalam string JSON sehingga tidak dapat memecah baris log baru. | Status `Closed / Fixed` pada scan setelah commit `1623ba9` (`fix(obs): event key, pgx params filter, job direction, server metrics`). |
+| #3 | `go/log-injection` (Log entries created from user input) | Medium | `internal/obs/http.go:36` | Sama seperti alert #1, pada pencatatan log level `INFO` untuk request HTTP dengan status `< 500`. | **Risiko termitigasi oleh structured JSON logging** dengan mekanisme yang sama seperti alert #1. | Status `Closed / Fixed` pada scan setelah commit `1623ba9`. |
+
+Setelah perbaikan diterapkan, scan ulang pada branch feat/dev menghasilkan 0 Open alerts dan 2 Closed (fixed) untuk kedua bahasa (go dan javascript-typescript). Bukti hasil scan dapat dilihat pada tab GitHub Actions (CodeQL SAST) serta Security --> Code scanning (filter branch:feat/dev).
+
+Hasil scan yang bersih (0 Open) tidak berarti aplikasi pasti aman sepenuhnya. CodeQL hanya melakukan analisis statis terhadap pola kerentanan dan aliran data yang tercakup oleh rule security-extended; kelemahan logika bisnis, kesalahan konfigurasi runtime/deployment, serta celah yang hanya muncul saat aplikasi berjalan tetap memerlukan pengujian dinamis (DAST), automated integration test, dan peninjauan kode manual.
 
 ## Format error
 
